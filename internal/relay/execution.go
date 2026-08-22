@@ -47,6 +47,26 @@ func HandleMessages(c *gin.Context) {
 	(&execution{ctx: c, protocol: &relayProtocol{format: llm.APIFormatAnthropicMessage, route: "/messages", authType: httpclient.AuthTypeAPIKey, inbound: anthropic.NewInboundTransformer()}}).execute()
 }
 
+// HandleEmbeddings 处理 OpenAI Embeddings 客户端请求。
+func HandleEmbeddings(c *gin.Context) {
+	(&execution{ctx: c, protocol: &relayProtocol{format: llm.APIFormatOpenAIEmbedding, route: "/embeddings", authType: httpclient.AuthTypeBearer, inbound: openai.NewEmbeddingInboundTransformer()}}).execute()
+}
+
+// HandleImagesGenerations 处理 OpenAI Images Generations 客户端请求。
+func HandleImagesGenerations(c *gin.Context) {
+	(&execution{ctx: c, protocol: &relayProtocol{format: llm.APIFormatOpenAIImageGeneration, route: "/images/generations", authType: httpclient.AuthTypeBearer, inbound: openai.NewImageGenerationInboundTransformer()}}).execute()
+}
+
+// HandleImagesEdits 处理 OpenAI Images Edits 客户端请求。
+func HandleImagesEdits(c *gin.Context) {
+	(&execution{ctx: c, protocol: &relayProtocol{format: llm.APIFormatOpenAIImageEdit, route: "/images/edits", authType: httpclient.AuthTypeBearer, inbound: openai.NewImageEditInboundTransformer()}}).execute()
+}
+
+// HandleImagesVariations 处理 OpenAI Images Variations 客户端请求。
+func HandleImagesVariations(c *gin.Context) {
+	(&execution{ctx: c, protocol: &relayProtocol{format: llm.APIFormatOpenAIImageVariation, route: "/images/variations", authType: httpclient.AuthTypeBearer, inbound: openai.NewImageVariationInboundTransformer()}}).execute()
+}
+
 // execute 初始化请求，并在渠道未选择时等待、失败时重试，直至提交响应或客户端取消。
 func (e *execution) execute() {
 	e.log = LogRecord{LogOverview: LogOverview{ID: requestIDs.Add(1), State: RequestStateRunning, StartedAt: time.Now(), ClientProtocol: e.protocol.format}}
