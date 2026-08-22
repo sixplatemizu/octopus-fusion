@@ -11,6 +11,7 @@ import (
 	"github.com/bestruirui/octopus/internal/helper"
 	"github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/op"
+	"github.com/bestruirui/octopus/internal/relay/balancer"
 	"github.com/gin-gonic/gin"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
@@ -30,6 +31,7 @@ type execution struct {
 	log            LogRecord          // 持续更新的完整请求记录。
 	requestMetrics model.StatsMetrics // requestMetrics 累积全部真实上游调用的用量和费用。
 	attemptIndex   int                // 当前请求已经分配的最后尝试序号。
+	group          *model.Group       // group 是当前命中的分组,用于会话保持和熔断记录。
 }
 
 // HandleChatCompletions 处理 OpenAI Chat Completions 客户端请求。
@@ -149,6 +151,7 @@ func (e *execution) execute() {
 }
 
 // resolveTarget 加载请求模型对应的分组并校验当前活动渠道，返回本轮分组项、渠道和重试间隔。
+// 自动模式下手动选中渠道未熔断时优先使用,否则按分组模式遍历候选序列。
 func (e *execution) resolveTarget(ctx context.Context) (model.GroupItem, *model.Channel, int, error) {
 	retryInterval := 1
 	group, err := op.GroupGetByName(e.request.model, ctx)
@@ -158,9 +161,17 @@ func (e *execution) resolveTarget(ctx context.Context) (model.GroupItem, *model.
 	if group.RetryInterval >= 1 {
 		retryInterval = group.RetryInterval
 	}
+	e.group = &group
 
 	var item model.GroupItem
 	if group.ActiveItemID == 0 {
+		if group.Mode != model.GroupModeManual {
+			item, channel, found := e.autoTarget(group, ctx)
+			if !found {
+				return model.GroupItem{}, nil, retryInterval, errNoActiveChannel
+			}
+			return item, channel, retryInterval, nil
+		}
 		return model.GroupItem{}, nil, retryInterval, errNoActiveChannel
 	}
 	for _, candidate := range group.Items {
@@ -170,19 +181,60 @@ func (e *execution) resolveTarget(ctx context.Context) (model.GroupItem, *model.
 		}
 	}
 	if item.ID == 0 {
+		if group.Mode != model.GroupModeManual {
+			item, channel, found := e.autoTarget(group, ctx)
+			if !found {
+				return model.GroupItem{}, nil, retryInterval, errNoActiveChannel
+			}
+			return item, channel, retryInterval, nil
+		}
 		return model.GroupItem{}, nil, retryInterval, errors.New("active channel not found")
 	}
 	channel, err := op.ChannelGet(item.ChannelID, ctx)
 	if err != nil {
+		if group.Mode != model.GroupModeManual {
+			if autoItem, autoChannel, found := e.autoTarget(group, ctx); found {
+				return autoItem, autoChannel, retryInterval, nil
+			}
+		}
 		return item, nil, retryInterval, errors.New("active channel not found")
 	}
-	if !channel.Enabled {
-		return item, channel, retryInterval, errors.New("active channel disabled")
-	}
-	if channel.Key == "" {
+	if !channel.Enabled || channel.Key == "" {
+		if group.Mode != model.GroupModeManual {
+			if tripped, _ := balancer.IsTripped(channel.ID, 0, item.ModelName); tripped {
+				if autoItem, autoChannel, found := e.autoTarget(group, ctx); found {
+					return autoItem, autoChannel, retryInterval, nil
+				}
+				return item, channel, retryInterval, errNoActiveChannel
+			}
+		}
+		if !channel.Enabled {
+			return item, channel, retryInterval, errors.New("active channel disabled")
+		}
 		return item, channel, retryInterval, errors.New("active channel has no available key")
 	}
+	if group.Mode != model.GroupModeManual {
+		if tripped, _ := balancer.IsTripped(channel.ID, 0, item.ModelName); tripped {
+			if autoItem, autoChannel, found := e.autoTarget(group, ctx); found {
+				return autoItem, autoChannel, retryInterval, nil
+			}
+			return item, channel, retryInterval, errNoActiveChannel
+		}
+	}
 	return item, channel, retryInterval, nil
+}
+
+// autoTarget 按分组模式生成候选序列并返回第一个可用渠道。
+func (e *execution) autoTarget(group model.Group, ctx context.Context) (model.GroupItem, *model.Channel, bool) {
+	apiKeyID := e.ctx.GetInt("api_key_id")
+	for _, candidate := range balancer.Candidates(group, apiKeyID, e.request.model) {
+		channel, err := op.ChannelGet(candidate.ChannelID, ctx)
+		if err != nil || !channel.Enabled || channel.Key == "" {
+			continue
+		}
+		return candidate, channel, true
+	}
+	return model.GroupItem{}, nil, false
 }
 
 // executeAttempt 执行当前渠道的一次上游尝试，提交前失败时交回外层继续重试。
@@ -238,6 +290,7 @@ func (e *execution) handleAttemptFailure(ctx context.Context, item model.GroupIt
 		e.requestMetrics.Add(metrics)
 		applyAttemptMetric(item, channel, metrics, duration, false)
 	}
+	balancer.RecordFailure(channel.ID, 0, item.ModelName)
 	e.log.Error = attempt.Error
 	e.emit(LogEventAttemptFinished, attempt)
 	return false, result.err
@@ -261,6 +314,10 @@ func (e *execution) commitAttempt(ctx, attemptCtx context.Context, item model.Gr
 	metrics := usageMetrics(item.ModelName, usage)
 	e.requestMetrics.Add(metrics)
 	applyAttemptMetric(item, channel, metrics, metricDuration, commit.err == nil || errors.Is(commit.err, errClientWrite) || errors.Is(commit.err, context.Canceled))
+	balancer.RecordSuccess(channel.ID, 0, item.ModelName)
+	if e.group != nil && e.group.SessionKeepTime > 0 && commit.err == nil {
+		balancer.SetSticky(e.ctx.GetInt("api_key_id"), e.request.model, channel.ID, 0)
+	}
 	if commit.err == nil {
 		e.finish(RequestStateSuccess, nil, commit.responseBody, usage)
 	} else if errors.Is(commit.err, context.Canceled) || ctx.Err() != nil {

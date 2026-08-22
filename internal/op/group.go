@@ -88,9 +88,17 @@ func GroupUpdate(req *model.GroupUpdateRequest, ctx context.Context) (*model.Gro
 		selectFields = append(selectFields, "name")
 		updates.Name = *req.Name
 	}
+	if req.Mode != nil {
+		selectFields = append(selectFields, "mode")
+		updates.Mode = *req.Mode
+	}
 	if req.RetryInterval != nil {
 		selectFields = append(selectFields, "retry_interval")
 		updates.RetryInterval = *req.RetryInterval
+	}
+	if req.SessionKeepTime != nil {
+		selectFields = append(selectFields, "session_keep_time")
+		updates.SessionKeepTime = *req.SessionKeepTime
 	}
 
 	if len(selectFields) > 0 {
@@ -121,16 +129,20 @@ func GroupUpdate(req *model.GroupUpdateRequest, ctx context.Context) (*model.Gro
 	if len(req.ItemsToUpdate) > 0 {
 		ids := make([]int, len(req.ItemsToUpdate))
 		priorityCase := "CASE id"
+		weightCase := "CASE id"
 		for i, item := range req.ItemsToUpdate {
 			ids[i] = item.ID
 			priorityCase += fmt.Sprintf(" WHEN %d THEN %d", item.ID, item.Priority)
+			weightCase += fmt.Sprintf(" WHEN %d THEN %d", item.ID, item.Weight)
 		}
 		priorityCase += " END"
+		weightCase += " END"
 
 		if err := tx.Model(&model.GroupItem{}).
 			Where("id IN ? AND group_id = ?", ids, req.ID).
 			Updates(map[string]interface{}{
 				"priority": gorm.Expr(priorityCase),
+				"weight":   gorm.Expr(weightCase),
 			}).Error; err != nil {
 			tx.Rollback()
 			return nil, fmt.Errorf("failed to update items: %w", err)
@@ -146,6 +158,7 @@ func GroupUpdate(req *model.GroupUpdateRequest, ctx context.Context) (*model.Gro
 				ChannelID: item.ChannelID,
 				ModelName: item.ModelName,
 				Priority:  item.Priority,
+				Weight:    item.Weight,
 			}
 		}
 		if err := tx.Create(&newItems).Error; err != nil {
@@ -318,7 +331,7 @@ func GroupItemBatchAdd(groupID int, items []model.GroupIDAndLLMName, ctx context
 
 func GroupItemUpdate(item *model.GroupItem, ctx context.Context) error {
 	if err := db.GetDB().WithContext(ctx).Model(item).
-		Select("ModelName", "Priority").
+		Select("ModelName", "Priority", "Weight").
 		Updates(item).Error; err != nil {
 		return err
 	}
