@@ -17,6 +17,26 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
 )
 
+// clientInbound 返回客户端协议对应的入站转换器。
+func clientInbound(format llm.APIFormat) transformer.Inbound {
+	switch format {
+	case llm.APIFormatOpenAIResponse:
+		return responses.NewInboundTransformer()
+	case llm.APIFormatAnthropicMessage:
+		return anthropic.NewInboundTransformer()
+	case llm.APIFormatOpenAIEmbedding:
+		return openai.NewEmbeddingInboundTransformer()
+	case llm.APIFormatOpenAIImageGeneration:
+		return openai.NewImageGenerationInboundTransformer()
+	case llm.APIFormatOpenAIImageEdit:
+		return openai.NewImageEditInboundTransformer()
+	case llm.APIFormatOpenAIImageVariation:
+		return openai.NewImageVariationInboundTransformer()
+	default:
+		return openai.NewInboundTransformer()
+	}
+}
+
 // upstreamPath 返回客户端协议在标准上游中对应的请求路径。
 func upstreamPath(format llm.APIFormat) string {
 	switch format {
@@ -24,6 +44,14 @@ func upstreamPath(format llm.APIFormat) string {
 		return "/responses"
 	case llm.APIFormatAnthropicMessage:
 		return "/messages"
+	case llm.APIFormatOpenAIEmbedding:
+		return "/embeddings"
+	case llm.APIFormatOpenAIImageGeneration:
+		return "/images/generations"
+	case llm.APIFormatOpenAIImageEdit:
+		return "/images/edits"
+	case llm.APIFormatOpenAIImageVariation:
+		return "/images/variations"
 	default:
 		return "/chat/completions"
 	}

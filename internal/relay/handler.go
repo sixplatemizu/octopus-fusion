@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"slices"
 	"strings"
@@ -18,23 +21,50 @@ import (
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/transformer"
-	"github.com/looplj/axonhub/llm/transformer/anthropic"
-	"github.com/looplj/axonhub/llm/transformer/openai"
-	"github.com/looplj/axonhub/llm/transformer/openai/responses"
 	"github.com/tidwall/sjson"
 )
 
+// requestMetadata 保存选组和分流所需的客户端请求元数据。
+type requestMetadata struct {
+	Model     string `json:"model"`  // 客户端请求的分组名称。
+	Streaming bool   `json:"stream"` // 客户端是否请求流式响应。
+}
+
+// parseRequestMetadata 解析选组所需的模型名和流式标记; 图片编辑与变体为 multipart 表单, 从表单字段读取。
+func parseRequestMetadata(raw *httpclient.Request) (requestMetadata, error) {
+	var metadata requestMetadata
+	contentType := raw.Headers.Get("Content-Type")
+	if strings.Contains(strings.ToLower(contentType), "multipart/form-data") {
+		_, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return metadata, fmt.Errorf("invalid multipart content type: %w", err)
+		}
+		form, err := multipart.NewReader(bytes.NewReader(raw.Body), params["boundary"]).ReadForm(64 << 20)
+		if err != nil {
+			return metadata, fmt.Errorf("invalid multipart form: %w", err)
+		}
+		if values := form.Value["model"]; len(values) > 0 {
+			metadata.Model = strings.TrimSpace(values[0])
+		}
+		if values := form.Value["stream"]; len(values) > 0 {
+			metadata.Streaming = strings.EqualFold(strings.TrimSpace(values[0]), "true")
+		}
+		return metadata, nil
+	}
+	if err := json.Unmarshal(raw.Body, &metadata); err != nil {
+		return metadata, err
+	}
+	return metadata, nil
+}
+
+// isMultipartBody 判断客户端请求体是否为 multipart 表单; 该形态无法按 JSON 路径改写模型字段。
+func isMultipartBody(raw *httpclient.Request) bool {
+	return strings.Contains(strings.ToLower(raw.Headers.Get("Content-Type")), "multipart/form-data")
+}
+
 // Forward 按客户端协议承载一个请求的完整转发过程: 解析请求, 定位分组, 循环选目标请求上游, 直至提交响应或请求结束。
 func Forward(format llm.APIFormat) gin.HandlerFunc {
-	var inbound transformer.Inbound
-	switch format {
-	case llm.APIFormatOpenAIResponse:
-		inbound = responses.NewInboundTransformer()
-	case llm.APIFormatAnthropicMessage:
-		inbound = anthropic.NewInboundTransformer()
-	default:
-		inbound = openai.NewInboundTransformer()
-	}
+	inbound := clientInbound(format)
 
 	return func(c *gin.Context) {
 		// 完整读取客户端请求, 正文先登记到请求状态, 后续每轮直接改写为当前目标请求。
@@ -45,11 +75,8 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 		}
 
 		// 此处只读取选组和分流所需字段; 完整协议校验由同协议上游或跨协议 pipeline 完成。
-		var metadata struct {
-			Model     string `json:"model"`  // 客户端请求的分组名称。
-			Streaming bool   `json:"stream"` // 客户端是否请求流式响应。
-		}
-		if err := json.Unmarshal(raw.Body, &metadata); err != nil {
+		metadata, err := parseRequestMetadata(raw)
+		if err != nil {
 			rejectRequest(c, inbound, err)
 			return
 		}
@@ -106,12 +133,14 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				continue
 			}
 
-			// 将分组成员配置的真实模型写入本轮上游请求。
-			raw.Body, err = sjson.SetBytes(raw.Body, "model", item.ModelName)
-			if err != nil {
-				request.markFailed(err, "", nil)
-				rejectRequest(c, inbound, err)
-				return
+			// 将分组成员配置的真实模型写入本轮上游请求; multipart 表单无法按 JSON 路径改写, 保持客户端原始模型名。
+			if !isMultipartBody(raw) {
+				raw.Body, err = sjson.SetBytes(raw.Body, "model", item.ModelName)
+				if err != nil {
+					request.markFailed(err, "", nil)
+					rejectRequest(c, inbound, err)
+					return
+				}
 			}
 			// OpenAI Chat 流式响应需显式要求上游在末尾附带用量。
 			if metadata.Streaming && format == llm.APIFormatOpenAIChatCompletion {
