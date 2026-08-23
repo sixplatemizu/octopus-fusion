@@ -93,12 +93,20 @@ func ChannelUpdate(req *model.ChannelUpdateRequest, ctx context.Context) (*model
 		selectFields = append(selectFields, "match_regex")
 		updates.MatchRegex = req.MatchRegex
 	}
+	if req.BaseUrls != nil {
+		selectFields = append(selectFields, "base_urls")
+		updates.BaseUrls = *req.BaseUrls
+	}
 
 	// 只有当有字段需要更新时才执行 UPDATE
 	if len(selectFields) > 0 {
 		if err := db.GetDB().WithContext(ctx).Model(&model.Channel{}).Where("id = ?", req.ID).Select(selectFields).Updates(&updates).Error; err != nil {
 			return nil, fmt.Errorf("failed to update channel: %w", err)
 		}
+	}
+
+	if err := channelKeysUpdate(req.ID, req, ctx); err != nil {
+		return nil, err
 	}
 
 	// 刷新缓存并返回最新数据
@@ -108,6 +116,67 @@ func ChannelUpdate(req *model.ChannelUpdateRequest, ctx context.Context) (*model
 
 	channel, _ := channelCache.Get(req.ID)
 	return &channel, nil
+}
+
+// channelKeysUpdate 处理渠道凭据的新增、更新和删除请求。
+func channelKeysUpdate(channelID int, req *model.ChannelUpdateRequest, ctx context.Context) error {
+	if len(req.KeysToAdd) == 0 && len(req.KeysToUpdate) == 0 && len(req.KeysToDelete) == 0 {
+		return nil
+	}
+	tx := db.GetDB().WithContext(ctx).Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	if len(req.KeysToDelete) > 0 {
+		if err := tx.Where("id IN ? AND channel_id = ?", req.KeysToDelete, channelID).Delete(&model.ChannelKey{}).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to delete channel keys: %w", err)
+		}
+	}
+	if len(req.KeysToUpdate) > 0 {
+		for _, keyReq := range req.KeysToUpdate {
+			updates := map[string]interface{}{}
+			if keyReq.Enabled != nil {
+				updates["enabled"] = *keyReq.Enabled
+			}
+			if keyReq.ChannelKey != nil {
+				updates["channel_key"] = *keyReq.ChannelKey
+			}
+			if keyReq.Remark != nil {
+				updates["remark"] = *keyReq.Remark
+			}
+			if len(updates) == 0 {
+				continue
+			}
+			if err := tx.Model(&model.ChannelKey{}).Where("id = ? AND channel_id = ?", keyReq.ID, channelID).Updates(updates).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("failed to update channel key %d: %w", keyReq.ID, err)
+			}
+		}
+	}
+	if len(req.KeysToAdd) > 0 {
+		newKeys := make([]model.ChannelKey, len(req.KeysToAdd))
+		for i, keyReq := range req.KeysToAdd {
+			newKeys[i] = model.ChannelKey{
+				ChannelID:  channelID,
+				Enabled:    keyReq.Enabled,
+				ChannelKey: keyReq.ChannelKey,
+				Remark:     keyReq.Remark,
+			}
+		}
+		if err := tx.Create(&newKeys).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to create channel keys: %w", err)
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return fmt.Errorf("failed to commit channel key changes: %w", err)
+	}
+	return nil
 }
 
 // ChannelEnabled 更新渠道启用状态。
@@ -167,6 +236,12 @@ func ChannelDel(id int, ctx context.Context) error {
 	if err := tx.Where("channel_id = ?", id).Delete(&model.GroupItem{}).Error; err != nil {
 		tx.Rollback()
 		return fmt.Errorf("failed to delete group items: %w", err)
+	}
+
+	// 删除关联的渠道凭据
+	if err := tx.Where("channel_id = ?", id).Delete(&model.ChannelKey{}).Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to delete channel keys: %w", err)
 	}
 
 	// 删除统计数据
@@ -234,11 +309,24 @@ func ChannelGet(id int, ctx context.Context) (*model.Channel, error) {
 	return &channel, nil
 }
 
+// ChannelTouchKey 更新缓存中指定渠道凭据的最近使用状态码和时间戳;仅作用于内存缓存,不落库。
+func ChannelTouchKey(channelID, keyID int, statusCode int) {
+	if keyID == 0 {
+		return
+	}
+	channel, ok := channelCache.Get(channelID)
+	if !ok {
+		return
+	}
+	channel.TouchKey(keyID, statusCode)
+	channelCache.Set(channelID, channel)
+}
+
 // channelRefreshCache 从数据库刷新全部渠道缓存。
 func channelRefreshCache(ctx context.Context) error {
 	channels := []model.Channel{}
 	if err := db.GetDB().WithContext(ctx).
-		Preload("Stats").
+		Preload("Stats").Preload("Keys").
 		Find(&channels).Error; err != nil {
 		log.Warnf("failed to get channels: %v", err)
 		return err
@@ -253,7 +341,7 @@ func channelRefreshCache(ctx context.Context) error {
 func channelRefreshCacheByID(id int, ctx context.Context) error {
 	var channel model.Channel
 	if err := db.GetDB().WithContext(ctx).
-		Preload("Stats").
+		Preload("Stats").Preload("Keys").
 		First(&channel, id).Error; err != nil {
 		return err
 	}

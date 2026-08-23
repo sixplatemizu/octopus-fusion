@@ -30,6 +30,9 @@ type forwarder struct {
 	protocol  *relayProtocol // 客户端协议规则。
 	request   *relayRequest  // 可重复构造的客户端请求。
 	client    *http.Client   // 渠道对应的 HTTP 客户端。
+	baseURL   string         // 本次尝试实际使用的上游基础地址。
+	key       string         // 本次尝试实际使用的上游访问凭据。
+	keyID     int            // 本次尝试实际使用的凭据条目 ID,单一 Key 时为 0。
 }
 
 // executeUpstream 准备并执行上游请求，验证响应后返回上游阶段结果。

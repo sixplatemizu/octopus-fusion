@@ -199,7 +199,7 @@ func (e *execution) resolveTarget(ctx context.Context) (model.GroupItem, *model.
 		}
 		return item, nil, retryInterval, errors.New("active channel not found")
 	}
-	if !channel.Enabled || channel.Key == "" {
+	if !channel.Enabled || channel.GetEffectiveKey().ChannelKey == "" {
 		if group.Mode != model.GroupModeManual {
 			if tripped, _ := balancer.IsTripped(channel.ID, 0, item.ModelName); tripped {
 				if autoItem, autoChannel, found := e.autoTarget(group, ctx); found {
@@ -229,7 +229,10 @@ func (e *execution) autoTarget(group model.Group, ctx context.Context) (model.Gr
 	apiKeyID := e.ctx.GetInt("api_key_id")
 	for _, candidate := range balancer.Candidates(group, apiKeyID, e.request.model) {
 		channel, err := op.ChannelGet(candidate.ChannelID, ctx)
-		if err != nil || !channel.Enabled || channel.Key == "" {
+		if err != nil || !channel.Enabled || channel.GetEffectiveKey().ChannelKey == "" {
+			continue
+		}
+		if tripped, _ := balancer.IsTripped(channel.ID, channel.GetEffectiveKey().ID, candidate.ModelName); tripped {
 			continue
 		}
 		return candidate, channel, true
@@ -244,25 +247,26 @@ func (e *execution) executeAttempt(ctx context.Context, item model.GroupItem, ch
 		e.recordUnavailableTarget(item, channel, err)
 		return false, err
 	}
+	usedKey := channel.GetEffectiveKey()
 	attemptCtx, cancelAttempt := context.WithCancel(ctx)
 	defer cancelAttempt()
 	startedAt := time.Now()
 	attempt := e.startAttempt(item, channel, cancelAttempt)
-	result := (&forwarder{protocol: e.protocol, request: &e.request, client: client}).executeUpstream(attemptCtx, item.ModelName, channel)
+	result := (&forwarder{protocol: e.protocol, request: &e.request, client: client, baseURL: channel.GetEffectiveURL(), key: usedKey.ChannelKey, keyID: usedKey.ID}).executeUpstream(attemptCtx, item.ModelName, channel)
 	interrupted := !clearAttempt(e.log.ID, attempt.Index)
 	if interrupted {
 		result.err = errors.New("relay attempt interrupted")
 	}
 	if result.err != nil {
-		return e.handleAttemptFailure(ctx, item, channel, attempt, result, time.Since(startedAt), interrupted)
+		return e.handleAttemptFailure(ctx, item, channel, attempt, result, time.Since(startedAt), interrupted, usedKey.ID)
 	}
 
-	e.commitAttempt(ctx, attemptCtx, item, channel, attempt, result, startedAt)
+	e.commitAttempt(ctx, attemptCtx, item, channel, attempt, result, startedAt, usedKey.ID)
 	return true, nil
 }
 
 // handleAttemptFailure 记录上游失败并决定当前请求是立即重试、等待重试还是结束。
-func (e *execution) handleAttemptFailure(ctx context.Context, item model.GroupItem, channel *model.Channel, attempt *LogAttempt, result upstreamResult, duration time.Duration, interrupted bool) (bool, error) {
+func (e *execution) handleAttemptFailure(ctx context.Context, item model.GroupItem, channel *model.Channel, attempt *LogAttempt, result upstreamResult, duration time.Duration, interrupted bool, keyID int) (bool, error) {
 	if result.response != nil {
 		result.response.Close()
 	}
@@ -285,19 +289,23 @@ func (e *execution) handleAttemptFailure(ctx context.Context, item model.GroupIt
 		e.finish(RequestStateCanceled, cancelErr, nil, nil)
 		return true, nil
 	}
+	var upstreamErr *httpclient.Error
+	if errors.As(result.err, &upstreamErr) && upstreamErr.StatusCode == http.StatusTooManyRequests {
+		op.ChannelTouchKey(channel.ID, keyID, http.StatusTooManyRequests)
+	}
 	if !errors.Is(result.err, errUnsupportedTarget) {
 		metrics := usageMetrics(item.ModelName, result.usage)
 		e.requestMetrics.Add(metrics)
 		applyAttemptMetric(item, channel, metrics, duration, false)
 	}
-	balancer.RecordFailure(channel.ID, 0, item.ModelName)
+	balancer.RecordFailure(channel.ID, keyID, item.ModelName)
 	e.log.Error = attempt.Error
 	e.emit(LogEventAttemptFinished, attempt)
 	return false, result.err
 }
 
 // commitAttempt 将已验证的上游响应提交给客户端，并完成本次尝试和请求统计。
-func (e *execution) commitAttempt(ctx, attemptCtx context.Context, item model.GroupItem, channel *model.Channel, attempt *LogAttempt, result upstreamResult, startedAt time.Time) {
+func (e *execution) commitAttempt(ctx, attemptCtx context.Context, item model.GroupItem, channel *model.Channel, attempt *LogAttempt, result upstreamResult, startedAt time.Time, keyID int) {
 	e.log.State = RequestStateCommitted
 	e.emit(LogEventResponseCommitted, attempt)
 
@@ -314,9 +322,10 @@ func (e *execution) commitAttempt(ctx, attemptCtx context.Context, item model.Gr
 	metrics := usageMetrics(item.ModelName, usage)
 	e.requestMetrics.Add(metrics)
 	applyAttemptMetric(item, channel, metrics, metricDuration, commit.err == nil || errors.Is(commit.err, errClientWrite) || errors.Is(commit.err, context.Canceled))
-	balancer.RecordSuccess(channel.ID, 0, item.ModelName)
+	balancer.RecordSuccess(channel.ID, keyID, item.ModelName)
+	op.ChannelTouchKey(channel.ID, keyID, http.StatusOK)
 	if e.group != nil && e.group.SessionKeepTime > 0 && commit.err == nil {
-		balancer.SetSticky(e.ctx.GetInt("api_key_id"), e.request.model, channel.ID, 0)
+		balancer.SetSticky(e.ctx.GetInt("api_key_id"), e.request.model, channel.ID, keyID)
 	}
 	if commit.err == nil {
 		e.finish(RequestStateSuccess, nil, commit.responseBody, usage)

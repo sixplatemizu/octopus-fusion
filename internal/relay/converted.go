@@ -44,7 +44,7 @@ func (f *forwarder) executeConverted(ctx context.Context, modelName string, chan
 		return upstreamResult{err: err}
 	}
 	request.Model = modelName
-	outbound, err := newOutbound(channel.Type, channel.BaseURL, channel.Key)
+	outbound, err := newOutbound(channel.Type, f.baseURL, f.key)
 	if err != nil {
 		return upstreamResult{err: fmt.Errorf("%w: %v", errUnsupportedTarget, err)}
 	}
