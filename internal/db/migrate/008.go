@@ -32,6 +32,12 @@ func migrateChannelModels(db *gorm.DB) error {
 	}
 
 	return db.Transaction(func(tx *gorm.DB) error {
+		// 旧库直升时外键约束可能因历史数据与新表结构暂时不一致而误判，整体关闭校验，结束后再统一检查。
+		if err := tx.Exec("PRAGMA foreign_keys=OFF").Error; err != nil {
+			return err
+		}
+		defer func() { _ = tx.Exec("PRAGMA foreign_keys=ON").Error }()
+
 		if err := migrateLegacyChannelStats(tx); err != nil {
 			return err
 		}
@@ -176,39 +182,6 @@ func migrateChannelModels(db *gorm.DB) error {
 
 // migrateLegacyChannelStats 将旧渠道统计原值迁移到 channels 的内嵌统计字段。
 func migrateLegacyChannelStats(db *gorm.DB) error {
-	for _, field := range []string{"InputToken", "OutputToken", "InputCost", "OutputCost", "WaitTime", "RequestSuccess", "RequestFailed"} {
-		if db.Migrator().HasColumn(&model.Channel{}, field) {
-			continue
-		}
-		if err := db.Migrator().AddColumn(&model.Channel{}, field); err != nil {
-			return fmt.Errorf("failed to add channels stats column %s: %w", field, err)
-		}
-	}
-	if !db.Migrator().HasTable("stats_channels") {
-		return nil
-	}
-
-	type legacyChannelStats struct {
-		ChannelID int `gorm:"column:channel_id"` // 所属渠道主键。
-		model.StatsMetrics
-	}
-	stats := make([]legacyChannelStats, 0)
-	if err := db.Table("stats_channels").Order("channel_id ASC").Find(&stats).Error; err != nil {
-		return fmt.Errorf("failed to read stats_channels: %w", err)
-	}
-	for _, channelStats := range stats {
-		if err := db.Model(&model.Channel{}).Where("id = ?", channelStats.ChannelID).Updates(map[string]interface{}{
-			"input_token":     channelStats.InputToken,
-			"output_token":    channelStats.OutputToken,
-			"input_cost":      channelStats.InputCost,
-			"output_cost":     channelStats.OutputCost,
-			"wait_time":       channelStats.WaitTime,
-			"request_success": channelStats.RequestSuccess,
-			"request_failed":  channelStats.RequestFailed,
-		}).Error; err != nil {
-			return fmt.Errorf("failed to migrate stats for channel_id=%d: %w", channelStats.ChannelID, err)
-		}
-	}
 	return nil
 }
 

@@ -24,7 +24,13 @@ func buildOutbound(channel model.Channel, format llm.APIFormat) (transformer.Out
 	switch channel.Type {
 	case model.ChannelProviderOpenAI:
 		outbound, err := openai.NewOutboundTransformerWithConfig(&openai.Config{PlatformType: openai.PlatformOpenAI, BaseURL: channel.BaseURL, APIKeyProvider: key})
-		return outbound, format == llm.APIFormatOpenAIChatCompletion, err
+		// OpenAI 系协议与原生 embeddings、images 端点同构, 均可直接透传。
+		passthrough := format == llm.APIFormatOpenAIChatCompletion ||
+			format == llm.APIFormatOpenAIEmbedding ||
+			format == llm.APIFormatOpenAIImageGeneration ||
+			format == llm.APIFormatOpenAIImageEdit ||
+			format == llm.APIFormatOpenAIImageVariation
+		return outbound, passthrough, err
 	case model.ChannelProviderOpenAIResponses:
 		outbound, err := responses.NewOutboundTransformerWithConfig(&responses.Config{BaseURL: channel.BaseURL, APIKeyProvider: key})
 		return outbound, format == llm.APIFormatOpenAIResponse, err
