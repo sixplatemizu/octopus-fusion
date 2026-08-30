@@ -69,11 +69,11 @@ type Group struct {
 
 // 分组内一个可选择的渠道模型分组项。
 type GroupItem struct {
-	ID             int           `json:"id" gorm:"primaryKey"`                                                          // 分组项主键。
-	GroupID        int           `json:"group_id" gorm:"not null;index:idx_group_channel_model,unique"`                 // 所属分组 ID。
-	ChannelModelID int           `json:"channel_model_id" gorm:"index:idx_group_channel_model,unique"`                  // 引用的渠道模型 ID。
+	ID             int           `json:"id" gorm:"primaryKey"`                                                                    // 分组项主键。
+	GroupID        int           `json:"group_id" gorm:"not null;index:idx_group_channel_model,unique"`                           // 所属分组 ID。
+	ChannelModelID int           `json:"channel_model_id" gorm:"not null;index:idx_group_channel_model,unique"`                  // 引用的渠道模型 ID。
 	ChannelModel   *ChannelModel `json:"channel_model,omitempty" gorm:"foreignKey:ChannelModelID;references:ID;constraint:OnDelete:CASCADE"` // 分组项引用的渠道模型。
-	Priority       int           `json:"priority"`                                                                      // Priority 决定界面展示和故障转移模式下的成员切换顺序。
+	Priority       int           `json:"priority" gorm:"not null"`                                                                // Priority 决定界面展示和故障转移模式下的成员切换顺序。
 }
 
 // 分组普通配置和成员变更请求。
