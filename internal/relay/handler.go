@@ -5,9 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/bestruirui/octopus/internal/model"
@@ -17,26 +21,56 @@ import (
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/transformer"
-	"github.com/looplj/axonhub/llm/transformer/anthropic"
-	"github.com/looplj/axonhub/llm/transformer/openai"
-	"github.com/looplj/axonhub/llm/transformer/openai/responses"
 	"github.com/tidwall/sjson"
 )
+
+// requestMetadata 保存选组和分流所需的客户端请求元数据。
+type requestMetadata struct {
+	Model     string `json:"model"`  // 客户端请求的分组名称。
+	Streaming bool   `json:"stream"` // 客户端是否请求流式响应。
+}
+
+// parseRequestMetadata 解析选组所需的模型名和流式标记; 图片编辑与变体为 multipart 表单, 从表单字段读取。
+func parseRequestMetadata(raw *httpclient.Request) (requestMetadata, error) {
+	var metadata requestMetadata
+	contentType := raw.Headers.Get("Content-Type")
+	if strings.Contains(strings.ToLower(contentType), "multipart/form-data") {
+		_, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return metadata, fmt.Errorf("invalid multipart content type: %w", err)
+		}
+		form, err := multipart.NewReader(bytes.NewReader(raw.Body), params["boundary"]).ReadForm(64 << 20)
+		if err != nil {
+			return metadata, fmt.Errorf("invalid multipart body: %w", err)
+		}
+		defer form.RemoveAll()
+		if values := form.Value["model"]; len(values) > 0 {
+			metadata.Model = values[0]
+		}
+		return metadata, nil
+	}
+	if err := json.Unmarshal(raw.Body, &metadata); err != nil {
+		return metadata, err
+	}
+	return metadata, nil
+}
+
+// isMultipartBody 判断客户端请求体是否为 multipart 表单; 该形态无法按 JSON 路径改写模型字段。
+func isMultipartBody(raw *httpclient.Request) bool {
+	return strings.Contains(strings.ToLower(raw.Headers.Get("Content-Type")), "multipart/form-data")
+}
 
 // Forward 按客户端协议承载一个请求的完整转发过程: 解析请求, 定位分组, 循环选目标请求上游, 直至提交响应或请求结束。
 func Forward(format llm.APIFormat) gin.HandlerFunc {
 	// 客户端协议同时定出入站转换器和请求协议位: 后者随请求状态推给界面, 也是每轮选择上游协议的首选。
-	var inbound transformer.Inbound
+	// 原生透传协议(embeddings/images)在授权模型里没有协议位, 沿用 Chat 协议位仅做界面展示。
+	inbound := clientInbound(format)
 	requestProtocol := model.ProtocolOpenAIChatCompletion
 	switch format {
 	case llm.APIFormatOpenAIResponse:
-		inbound = responses.NewInboundTransformer()
 		requestProtocol = model.ProtocolOpenAIResponse
 	case llm.APIFormatAnthropicMessage:
-		inbound = anthropic.NewInboundTransformer()
 		requestProtocol = model.ProtocolAnthropicMessage
-	default:
-		inbound = openai.NewInboundTransformer()
 	}
 
 	return func(c *gin.Context) {
@@ -48,11 +82,8 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 		}
 
 		// 此处只读取选组和分流所需字段; 完整协议校验由同协议上游或跨协议 pipeline 完成。
-		var metadata struct {
-			Model     string `json:"model"`  // 客户端请求的分组名称。
-			Streaming bool   `json:"stream"` // 客户端是否请求流式响应。
-		}
-		if err := json.Unmarshal(raw.Body, &metadata); err != nil {
+		metadata, err := parseRequestMetadata(raw)
+		if err != nil {
 			rejectRequest(c, inbound, err)
 			return
 		}
@@ -125,12 +156,14 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				continue
 			}
 
-			// 将分组成员配置的真实模型写入本轮上游请求。
-			raw.Body, err = sjson.SetBytes(raw.Body, "model", channelModel.Name)
-			if err != nil {
-				request.markFailed(err, "", nil)
-				rejectRequest(c, inbound, err)
-				return
+			// 将分组成员配置的真实模型写入本轮上游请求; multipart 表单无法按 JSON 路径改写, 保持客户端原始模型名。
+			if !isMultipartBody(raw) {
+				raw.Body, err = sjson.SetBytes(raw.Body, "model", channelModel.Name)
+				if err != nil {
+					request.markFailed(err, "", nil)
+					rejectRequest(c, inbound, err)
+					return
+				}
 			}
 			// OpenAI Chat 流式响应需显式要求上游在末尾附带用量。
 			if metadata.Streaming && format == llm.APIFormatOpenAIChatCompletion {
@@ -142,9 +175,14 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				}
 			}
 
-			// 在渠道授权支持的协议内选出本轮上游协议, 按该协议的路径与授权绑定的凭据构造出站转换器。
-			// 先于登记本轮目标: 选中的协议是本轮目标的一部分, 需与渠道和模型一并推给界面。
-			outbound, targetProtocol, passthrough, err := buildOutbound(channel, grant, *channelKey, requestProtocol)
+			// 原生透传协议不进授权协议分流, 按渠道地址直接透传; 其余协议在渠道授权支持的协议内选出本轮上游协议。
+			// 选中的协议先于登记本轮目标: 它是本轮目标的一部分, 需与渠道和模型一并推给界面。
+			targetProtocol := requestProtocol
+			var outbound transformer.Outbound
+			var passthrough bool
+			if !isRawPassthroughFormat(format) {
+				outbound, targetProtocol, passthrough, err = buildOutbound(channel, grant, *channelKey, requestProtocol)
+			}
 
 			// 为本轮上游调用建立独立取消入口并登记当前目标; 取消原因用于区分人工中止与响应超时。
 			roundCtx, cancelRoundCause := context.WithCancelCause(ctx)
@@ -170,8 +208,10 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				timeoutTimer := time.AfterFunc(time.Duration(timeoutSeconds)*time.Second, func() {
 					cancelRoundCause(timeoutErr)
 				})
-				// 客户端与渠道协议一致时直接透传, 其余组合通过 pipeline 转换。
-				if passthrough {
+				// 客户端与渠道协议一致时直接透传, 原生端点按渠道地址透传, 其余组合通过 pipeline 转换。
+				if isRawPassthroughFormat(format) {
+					result, err = sendRawPassthrough(roundCtx, format, raw, channel, *channelKey)
+				} else if passthrough {
 					result, err = sendPassthrough(roundCtx, format, raw, channel, outbound, metadata.Streaming, channelModel.Name)
 				} else {
 					result, err = sendConverted(roundCtx, format, raw, channel, outbound, metadata.Streaming)

@@ -11,6 +11,7 @@ import (
 	"github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/rhttp"
 	"github.com/looplj/axonhub/llm"
+	"github.com/looplj/axonhub/llm/auth"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/pipeline"
 	"github.com/looplj/axonhub/llm/streams"
@@ -143,13 +144,53 @@ func sendPassthroughStream(ctx context.Context, format llm.APIFormat, request *h
 	return nil, err
 }
 
+// sendRawPassthrough 向原生端点(embeddings/images)发起非流式透传并取回用量。
+// 上游响应经 openai 出站转换器按请求 APIFormat 分发解析, 其用量即本轮用量; 响应正文原样回给客户端。
+func sendRawPassthrough(ctx context.Context, format llm.APIFormat, raw *httpclient.Request, channel model.Channel, channelKey model.ChannelKey) (*upstreamResponse, error) {
+	httpClient, closeIdle, err := resolveUpstreamClient(channel)
+	if err != nil {
+		return nil, err
+	}
+	// 非流式响应在 Do 返回时正文已读完, 连接可以立即归还。
+	if closeIdle != nil {
+		defer closeIdle()
+	}
+
+	request, err := buildRawPassthroughRequest(format, raw, channel, channelKey)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := httpclient.NewHttpClientWithClient(httpClient).Do(ctx, request)
+	if err != nil {
+		var failure *httpclient.Error
+		if errors.As(err, &failure) && len(failure.Body) > 0 {
+			return nil, fmt.Errorf("%w: %s", err, failure.Body)
+		}
+		return nil, err
+	}
+	// 响应按请求携带的 APIFormat 分发到 image/embedding 解析, 取得用量并识别以 200 下发的失败终态。
+	outbound, err := openai.NewOutboundTransformerWithConfig(&openai.Config{PlatformType: openai.PlatformOpenAI, BaseURL: channel.BaseURL, APIKeyProvider: auth.NewStaticKeyProvider(channelKey.Key)})
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := outbound.TransformResponse(ctx, response)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, response.Body)
+	}
+	if err := validateResponse(format, parsed); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, response.Body)
+	}
+	return &upstreamResponse{body: slices.Clone(response.Body), header: response.Headers.Clone(), usage: parsed.Usage}, nil
+}
+
 // conversionMiddleware 保存跨协议 pipeline 单次调用需要应用和取得的状态。
 type conversionMiddleware struct {
-	pipeline.DummyMiddleware // 提供本次无需处理的其余 pipeline 中间件方法。
-	channel model.Channel // 本轮上游请求使用的渠道配置。
-	format  llm.APIFormat // 上游渠道协议, 用于校验统一响应终态。
-	rawBody []byte        // 上游非流式响应或错误的原始正文。
-	usage   *llm.Usage    // 非流式统一响应中确认的用量。
+	pipeline.DummyMiddleware               // 提供本次无需处理的其余 pipeline 中间件方法。
+	channel                  model.Channel // 本轮上游请求使用的渠道配置。
+	format                   llm.APIFormat // 上游渠道协议, 用于校验统一响应终态。
+	rawBody                  []byte        // 上游非流式响应或错误的原始正文。
+	usage                    *llm.Usage    // 非流式统一响应中确认的用量。
 }
 
 // OnOutboundRawRequest 在转换后的上游请求上应用渠道参数和自定义 Header。

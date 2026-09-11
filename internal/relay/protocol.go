@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/bestruirui/octopus/internal/model"
 	"github.com/looplj/axonhub/llm"
@@ -16,6 +17,91 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
 )
+
+// clientInbound 返回客户端协议对应的入站转换器。
+func clientInbound(format llm.APIFormat) transformer.Inbound {
+	switch format {
+	case llm.APIFormatOpenAIResponse:
+		return responses.NewInboundTransformer()
+	case llm.APIFormatAnthropicMessage:
+		return anthropic.NewInboundTransformer()
+	case llm.APIFormatOpenAIEmbedding:
+		return openai.NewEmbeddingInboundTransformer()
+	case llm.APIFormatOpenAIImageGeneration:
+		return openai.NewImageGenerationInboundTransformer()
+	case llm.APIFormatOpenAIImageEdit:
+		return openai.NewImageEditInboundTransformer()
+	case llm.APIFormatOpenAIImageVariation:
+		return openai.NewImageVariationInboundTransformer()
+	default:
+		return openai.NewInboundTransformer()
+	}
+}
+
+// upstreamPath 返回客户端协议在标准上游中对应的请求路径。
+func upstreamPath(format llm.APIFormat) string {
+	switch format {
+	case llm.APIFormatOpenAIResponse:
+		return "/responses"
+	case llm.APIFormatAnthropicMessage:
+		return "/messages"
+	case llm.APIFormatOpenAIEmbedding:
+		return "/embeddings"
+	case llm.APIFormatOpenAIImageGeneration:
+		return "/images/generations"
+	case llm.APIFormatOpenAIImageEdit:
+		return "/images/edits"
+	case llm.APIFormatOpenAIImageVariation:
+		return "/images/variations"
+	default:
+		return "/chat/completions"
+	}
+}
+
+// isRawPassthroughFormat 判断是否为原生透传协议; embeddings 与 images 在授权模型里没有协议位,
+// 不进 grants 三协议分流, 按渠道地址直接透传, 分组成员关系即准入依据。
+func isRawPassthroughFormat(format llm.APIFormat) bool {
+	switch format {
+	case llm.APIFormatOpenAIEmbedding,
+		llm.APIFormatOpenAIImageGeneration,
+		llm.APIFormatOpenAIImageEdit,
+		llm.APIFormatOpenAIImageVariation:
+		return true
+	default:
+		return false
+	}
+}
+
+// buildRawPassthroughRequest 构造原生透传的上游请求: 地址按渠道地址与协议路径拼接, 认证取授权绑定的凭据,
+// 其余请求头与查询参数经 MergeInboundRequest 透传; APIFormat 随请求带给响应解析做分发。
+func buildRawPassthroughRequest(format llm.APIFormat, raw *httpclient.Request, channel model.Channel, channelKey model.ChannelKey) (*httpclient.Request, error) {
+	// BaseURL 以 ## 结尾表示地址已完整, 不再追加版本号和协议路径。
+	base := strings.TrimSuffix(channel.BaseURL, "##")
+	url := transformer.BuildRequestURL(base, "v1", upstreamPath(format), "", base != channel.BaseURL)
+
+	// Content-Type 属于库自管头, 不会随客户端请求透传, 需按客户端原值显式重建。
+	contentType := raw.Headers.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/json"
+	}
+
+	request := httpclient.MergeInboundRequest(&httpclient.Request{
+		Method:    raw.Method,
+		URL:       url,
+		Headers:   http.Header{"Content-Type": []string{contentType}},
+		Body:      raw.Body,
+		Auth:      &httpclient.AuthConfig{Type: httpclient.AuthTypeBearer, APIKey: channelKey.Key},
+		APIFormat: format.String(),
+	}, raw)
+	request, err := httpclient.FinalizeAuthHeaders(request)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyChannelConfig(channel, request); err != nil {
+		return nil, err
+	}
+	return request, nil
+}
 
 // buildPassthroughRequest 构造同协议透传的上游请求: 目标地址, 认证和请求体由渠道决定, 客户端的其余请求头和查询参数
 // 经 MergeInboundRequest 透传给上游, 其中认证类, 库自管类和逐跳类请求头会被丢弃以免覆盖渠道凭据。
