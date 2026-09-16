@@ -77,6 +77,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 		// 完整读取客户端请求, 正文先登记到请求状态, 后续每轮直接改写为当前目标请求。
 		raw, err := httpclient.ReadHTTPRequest(c.Request)
 		if err != nil {
+			logReject("", err)
 			rejectRequest(c, inbound, err)
 			return
 		}
@@ -84,6 +85,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 		// 此处只读取选组和分流所需字段; 完整协议校验由同协议上游或跨协议 pipeline 完成。
 		metadata, err := parseRequestMetadata(raw)
 		if err != nil {
+			logReject("", err)
 			rejectRequest(c, inbound, err)
 			return
 		}
@@ -91,7 +93,9 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 		// API Key 限定了模型范围时只放行范围内的模型, 为空表示不限制。
 		if allowed, ok := c.Get("supported_models"); ok {
 			if names, _ := allowed.([]string); len(names) > 0 && !slices.Contains(names, metadata.Model) {
-				rejectRequest(c, inbound, errors.New("model not supported by this api key"))
+				err := errors.New("model not supported by this api key")
+				logReject(metadata.Model, err)
+				rejectRequest(c, inbound, err)
 				return
 			}
 		}
@@ -100,7 +104,9 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 		// 分组主键随请求状态一并登记, 界面由此可直接按主键取分组而不必按名称回查。
 		group, err := op.GroupGetByName(metadata.Model)
 		if err != nil {
-			rejectRequest(c, inbound, errors.New("model not found"))
+			err = errors.New("model not found")
+			logReject(metadata.Model, err)
+			rejectRequest(c, inbound, err)
 			return
 		}
 
@@ -109,10 +115,18 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 		ctx := c.Request.Context()
 		failedItemID := 0 // 当前累计连续失败次数的成员 ID。
 		failures := 0     // 该成员包含首次请求的连续失败次数。
+		rounds := 0       // 本请求已发起的上游轮数，用于 CLI 日志。
+		lastChannelID := 0
+		lastChannel := "" // 最新一轮的渠道名称，终态行使用。
+		lastModel := ""   // 最新一轮实际请求上游的模型名称，终态行使用。
+		done := func(success bool, status Status, usage *llm.Usage, errText string) {
+			logRelayDone(request.ID, metadata.Model, lastChannelID, lastChannel, lastModel, success, status, request.StartedAt, usage, errText, rounds)
+		}
 
 		for {
 			if ctx.Err() != nil {
 				request.markCanceled(ctx.Err(), "", nil)
+				done(false, StatusCanceled, nil, ctx.Err().Error())
 				return
 			}
 
@@ -120,6 +134,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 			group, err = op.GroupGetByName(metadata.Model)
 			if err != nil {
 				if !request.wait(ctx, model.DefaultGroupRelayConfig().MemberRetryIntervalSeconds) {
+					done(false, StatusCanceled, nil, ctx.Err().Error())
 					return
 				}
 				continue
@@ -130,6 +145,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 			item := pickGroupItem(group)
 			if item.ID == 0 {
 				if !request.wait(ctx, group.RelayConfig.MemberRetryIntervalSeconds) {
+					done(false, StatusCanceled, nil, ctx.Err().Error())
 					return
 				}
 				continue
@@ -140,6 +156,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 			grant, err := op.ChannelGrantGet(item.ChannelGrantID)
 			if err != nil {
 				if !request.wait(ctx, group.RelayConfig.MemberRetryIntervalSeconds) {
+					done(false, StatusCanceled, nil, ctx.Err().Error())
 					return
 				}
 				continue
@@ -151,16 +168,22 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 			channel, err := op.ChannelGet(channelModel.ChannelID)
 			if err != nil {
 				if !request.wait(ctx, group.RelayConfig.MemberRetryIntervalSeconds) {
+					done(false, StatusCanceled, nil, ctx.Err().Error())
 					return
 				}
 				continue
 			}
+			// 记下本轮目标，供 CLI 日志终态行使用。
+			lastChannelID = channel.ID
+			lastChannel = channel.Name
+			lastModel = channelModel.Name
 
 			// 将分组成员配置的真实模型写入本轮上游请求; multipart 表单无法按 JSON 路径改写, 保持客户端原始模型名。
 			if !isMultipartBody(raw) {
 				raw.Body, err = sjson.SetBytes(raw.Body, "model", channelModel.Name)
 				if err != nil {
 					request.markFailed(err, "", nil)
+					done(false, StatusFailed, nil, err.Error())
 					rejectRequest(c, inbound, err)
 					return
 				}
@@ -170,6 +193,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				raw.Body, err = sjson.SetBytes(raw.Body, "stream_options.include_usage", true)
 				if err != nil {
 					request.markFailed(err, "", nil)
+					done(false, StatusFailed, nil, err.Error())
 					rejectRequest(c, inbound, err)
 					return
 				}
@@ -191,6 +215,8 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				cancelRoundCause(context.Canceled)
 			}
 			request.startRound(cancelRound, channel.Name, channelModel.Name, targetProtocol)
+			rounds++
+			logForwarding(request.ID, metadata.Model, group.Mode, channel.ID, channel.Name, channelModel.Name, rounds, metadata.Streaming)
 
 			roundStartedAt := time.Now() // 本轮上游调用的开始时间, 用于统计首个有效响应耗时。
 
@@ -239,6 +265,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				if ctx.Err() != nil {
 					releaseRouteProbe(group, item.ID)
 					request.markCanceled(ctx.Err(), "", nil)
+					done(false, StatusCanceled, nil, ctx.Err().Error())
 					return
 				}
 				// 仅人工中止本轮时不计失败也不等待; 响应超时属于真实失败并消耗尝试次数。
@@ -262,9 +289,12 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				}
 				// 达到总尝试次数时成员进入冷却并立即重新选路, 否则等待后重试。
 				if recordRouteFailure(group, item.ID, failures) {
+					logRoundFailed(request.ID, rounds, channel.ID, channel.Name, channelModel.Name, err.Error())
 					continue
 				}
+				logRoundFailed(request.ID, rounds, channel.ID, channel.Name, channelModel.Name, err.Error())
 				if !request.wait(ctx, group.RelayConfig.MemberRetryIntervalSeconds) {
+					done(false, StatusCanceled, nil, ctx.Err().Error())
 					return
 				}
 				continue
@@ -300,12 +330,15 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				if err != nil {
 					if ctx.Err() != nil {
 						request.markCanceled(ctx.Err(), string(result.body), result.usage)
+						done(false, StatusCanceled, result.usage, ctx.Err().Error())
 					} else {
 						request.markFailed(err, string(result.body), result.usage)
+						done(false, StatusFailed, result.usage, err.Error())
 					}
 					return
 				}
 				request.markSucceeded(string(result.body), result.usage)
+				done(true, StatusSuccess, result.usage, "")
 				return
 			}
 
@@ -377,12 +410,15 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 			if err != nil {
 				if ctx.Err() != nil {
 					request.markCanceled(ctx.Err(), string(responseBody), result.usage)
+					done(false, StatusCanceled, result.usage, ctx.Err().Error())
 				} else {
 					request.markFailed(err, string(responseBody), result.usage)
+					done(false, StatusFailed, result.usage, err.Error())
 				}
 				return
 			}
 			request.markSucceeded(string(responseBody), result.usage)
+			done(true, StatusSuccess, result.usage, "")
 			return
 		}
 	}

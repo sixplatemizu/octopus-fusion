@@ -23,7 +23,7 @@ export function LoginForm() {
   const [mode, setMode] = useState<LoginMode>('user')
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
-  const [trustDevice, setTrustDevice] = useState(false) // trustDevice 表示是否请求后端签发 30 天登录凭证。
+  const [trustDevice, setTrustDevice] = useState(true) // 默认信任本机浏览器，开箱即签发 30 天凭证。
   const [apiKey, setApiKey] = useState("")
   const [error, setError] = useState<string | null>(null)
 
