@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ChevronLeft, Plus, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { useTranslations } from 'use-intl';
 import {
     type ChannelDetail,
@@ -16,6 +17,7 @@ import { Switch } from '@/components/ui/switch';
 import { FormGrants } from './FormGrants';
 import { FormKeys } from './FormKeys';
 import { IconButton } from '@/components/common/IconButton';
+import { useSettingStore } from '@/stores/setting';
 import {
     emptyFormState,
     fromChannel,
@@ -54,6 +56,7 @@ export function ChannelForm({ channelId, onBack }: {
 // 模板给出地址与路径 -> 拉取需要地址与凭据 -> 授权引用凭据与模型。
 function ChannelFormFields({ channel, onBack }: { channel?: ChannelDetail; onBack?: () => void }) {
     const t = useTranslations('channel.form');
+    const locale = useSettingStore((state) => state.locale);
     const { setIsOpen } = useMorphingDialog();
     const createChannel = useCreateChannel();
     const updateChannel = useUpdateChannel();
@@ -98,8 +101,14 @@ function ChannelFormFields({ channel, onBack }: { channel?: ChannelDetail; onBac
         event.preventDefault();
         if (!canSubmit) return;
         const detail = toChannelDetail(state, channel?.id ?? 0);
-        const mutation = channel ? updateChannel : createChannel;
-        mutation.mutate(detail, { onSuccess: () => setIsOpen(false) });
+        if (channel) {
+            updateChannel.mutate(detail, { onSuccess: () => setIsOpen(false) });
+        } else {
+            createChannel.mutate(detail, {
+                onSuccess: () => setIsOpen(false),
+                onError: (error) => toast.error(error.message),
+            });
+        }
     };
 
     // 表单高度固定, 否则切换步骤时弹窗会随内容高度跳动; 内容更高的步骤由步骤区内部滚动消化。
@@ -146,7 +155,10 @@ function ChannelFormFields({ channel, onBack }: { channel?: ChannelDetail; onBac
                                     className="flex items-center gap-4 rounded-xl border border-border px-5 py-4 hover:bg-muted/50 transition-colors"
                                 >
                                     <preset.Icon className={`size-7 shrink-0 ${preset.iconClassName ?? ''}`} />
-                                    <span className="text-base font-medium truncate">{preset.label}</span>
+                                    <span className="min-w-0 text-left">
+                                        <span className="block truncate text-lg font-semibold">{preset.label}</span>
+                                        <span className="block truncate text-xs text-muted-foreground">{preset.description[locale]}</span>
+                                    </span>
                                 </button>
                             ))}
                         </div>
