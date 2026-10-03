@@ -144,21 +144,36 @@ func sendPassthroughStream(ctx context.Context, format llm.APIFormat, request *h
 	return nil, err
 }
 
-// sendRawPassthrough 向原生端点(embeddings/images)发起非流式透传并取回用量。
-// 上游响应经 openai 出站转换器按请求 APIFormat 分发解析, 其用量即本轮用量; 响应正文原样回给客户端。
-func sendRawPassthrough(ctx context.Context, format llm.APIFormat, raw *httpclient.Request, channel model.Channel, channelKey model.ChannelKey) (*upstreamResponse, error) {
+// sendRawPassthrough 向原生端点(embeddings/images)发起透传并取回用量。
+// 流式时预读首个有效事件, 与同协议流式共用一套提交语义; 响应正文原样回给客户端。
+func sendRawPassthrough(ctx context.Context, format llm.APIFormat, raw *httpclient.Request, channel model.Channel, channelKey model.ChannelKey, streaming bool) (*upstreamResponse, error) {
 	httpClient, closeIdle, err := resolveUpstreamClient(channel)
 	if err != nil {
 		return nil, err
 	}
-	// 非流式响应在 Do 返回时正文已读完, 连接可以立即归还。
+	// 流式响应要等消费方读完才能归还连接, 故只在提交流式结果那一处移交, 其余出口一律就地归还。
+	committed := false
 	if closeIdle != nil {
-		defer closeIdle()
+		defer func() {
+			if !committed {
+				closeIdle()
+			}
+		}()
 	}
 
 	request, err := buildRawPassthroughRequest(format, raw, channel, channelKey)
 	if err != nil {
 		return nil, err
+	}
+
+	if streaming {
+		result, err := sendRawPassthroughStream(ctx, format, request, httpClient)
+		if err != nil {
+			return nil, err
+		}
+		result.closeIdle = closeIdle
+		committed = true
+		return result, nil
 	}
 
 	response, err := httpclient.NewHttpClientWithClient(httpClient).Do(ctx, request)
@@ -182,6 +197,51 @@ func sendRawPassthrough(ctx context.Context, format llm.APIFormat, raw *httpclie
 		return nil, fmt.Errorf("%w: %s", err, response.Body)
 	}
 	return &upstreamResponse{body: slices.Clone(response.Body), header: response.Headers.Clone(), usage: parsed.Usage}, nil
+}
+
+// sendRawPassthroughStream 发起原生端点流式透传并预读首个有效事件, 首个事件通过验证才算本轮取得可提交响应。
+// 与 sendPassthroughStream 共用语义: 上游响应头原样保留, 用量在消费方聚合事件后回填。
+func sendRawPassthroughStream(ctx context.Context, format llm.APIFormat, request *httpclient.Request, client *http.Client) (*upstreamResponse, error) {
+	rawRequest, err := httpclient.BuildHttpRequest(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	// 客户端的 Accept 属于库自管头不会透传, 需显式声明才能让上游按 SSE 返回。
+	rawRequest.Header.Set("Accept", "text/event-stream")
+
+	response, err := client.Do(rawRequest)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode >= http.StatusBadRequest {
+		failure, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		return nil, fmt.Errorf("upstream responded %s: %s", response.Status, failure)
+	}
+
+	events := httpclient.NewDefaultSSEDecoder(ctx, response.Body)
+	for events.Next() {
+		event := events.Current()
+		if event == nil || len(event.Data) == 0 {
+			continue
+		}
+		last, err := inspectStreamEvent(format, event)
+		if err != nil {
+			events.Close()
+			return nil, fmt.Errorf("%w: %s", err, event.Data)
+		}
+		return &upstreamResponse{header: response.Header.Clone(), events: events, first: event, last: last}, nil
+	}
+
+	err = events.Err()
+	events.Close()
+	if err == nil {
+		err = errors.New("upstream stream ended before first event")
+	}
+	return nil, err
 }
 
 // conversionMiddleware 保存跨协议 pipeline 单次调用需要应用和取得的状态。

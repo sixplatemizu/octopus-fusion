@@ -47,6 +47,10 @@ func parseRequestMetadata(raw *httpclient.Request) (requestMetadata, error) {
 		if values := form.Value["model"]; len(values) > 0 {
 			metadata.Model = values[0]
 		}
+		if values := form.Value["stream"]; len(values) > 0 {
+			streamFlag := strings.ToLower(strings.TrimSpace(values[0]))
+			metadata.Streaming = streamFlag == "true" || streamFlag == "1"
+		}
 		return metadata, nil
 	}
 	if err := json.Unmarshal(raw.Body, &metadata); err != nil {
@@ -183,8 +187,15 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 			lastChannel = channel.Name
 			lastModel = channelModel.Name
 
-			// 将分组成员配置的真实模型写入本轮上游请求; multipart 表单无法按 JSON 路径改写, 保持客户端原始模型名。
-			if !isMultipartBody(raw) {
+			// 将分组成员配置的真实模型写入本轮上游请求; multipart 表单按 part 替换模型字段并更新 boundary。
+			if isMultipartBody(raw) {
+				if err := rewriteMultipartRequestModel(raw, channelModel.Name); err != nil {
+					request.markFailed(err, "", nil)
+					done(false, StatusFailed, nil, err.Error())
+					rejectRequest(c, inbound, err)
+					return
+				}
+			} else {
 				raw.Body, err = sjson.SetBytes(raw.Body, "model", channelModel.Name)
 				if err != nil {
 					request.markFailed(err, "", nil)
@@ -241,7 +252,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 				})
 				// 客户端与渠道协议一致时直接透传, 原生端点按渠道地址透传, 其余组合通过 pipeline 转换。
 				if isRawPassthroughFormat(format) {
-					result, err = sendRawPassthrough(roundCtx, format, raw, channel, *channelKey)
+					result, err = sendRawPassthrough(roundCtx, format, raw, channel, *channelKey, metadata.Streaming)
 				} else if passthrough {
 					result, err = sendPassthrough(roundCtx, format, raw, channel, outbound, metadata.Streaming, channelModel.Name)
 				} else {

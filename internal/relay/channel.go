@@ -54,8 +54,10 @@ func buildOutbound(channel model.Channel, grant model.ChannelGrant, channelKey m
 var clientHeaderPlaceholder = regexp.MustCompile(`\{client_header:[^}]+\}`)
 
 // applyChannelConfig 按渠道配置覆盖上游请求的参数并追加自定义 Header; model 与 stream 由转发流程决定, 不允许覆盖。
+// multipart 表单不是 JSON, 参数覆盖跳过, 自定义 Header 照常追加。
 func applyChannelConfig(channel model.Channel, request *httpclient.Request) error {
-	if channel.ParamOverride != "" {
+	// multipart 表单不是 JSON, 参数覆盖对其无定义, 整体跳过, 自定义 Header 照常追加。
+	if channel.ParamOverride != "" && !isMultipartBody(request) {
 		var overrides map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(channel.ParamOverride), &overrides); err != nil {
 			return fmt.Errorf("invalid channel parameter override: %w", err)

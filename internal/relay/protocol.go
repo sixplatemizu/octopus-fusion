@@ -72,12 +72,17 @@ func isRawPassthroughFormat(format llm.APIFormat) bool {
 	}
 }
 
+// buildRawPassthroughURL 按渠道地址与协议路径拼出透传目标地址。
+// BaseURL 以 ## 结尾表示地址已完整, 不再追加版本号和协议路径。
+func buildRawPassthroughURL(baseURL string, format llm.APIFormat) string {
+	base := strings.TrimSuffix(baseURL, "##")
+	return transformer.BuildRequestURL(base, "v1", upstreamPath(format), "", base != baseURL)
+}
+
 // buildRawPassthroughRequest 构造原生透传的上游请求: 地址按渠道地址与协议路径拼接, 认证取授权绑定的凭据,
 // 其余请求头与查询参数经 MergeInboundRequest 透传; APIFormat 随请求带给响应解析做分发。
 func buildRawPassthroughRequest(format llm.APIFormat, raw *httpclient.Request, channel model.Channel, channelKey model.ChannelKey) (*httpclient.Request, error) {
-	// BaseURL 以 ## 结尾表示地址已完整, 不再追加版本号和协议路径。
-	base := strings.TrimSuffix(channel.BaseURL, "##")
-	url := transformer.BuildRequestURL(base, "v1", upstreamPath(format), "", base != channel.BaseURL)
+	url := buildRawPassthroughURL(channel.BaseURL, format)
 
 	// Content-Type 属于库自管头, 不会随客户端请求透传, 需按客户端原值显式重建。
 	contentType := raw.Headers.Get("Content-Type")
@@ -149,7 +154,11 @@ func inspectStreamEvent(format llm.APIFormat, event *httpclient.StreamEvent) (bo
 	}
 
 	switch format {
-	case llm.APIFormatOpenAIChatCompletion:
+	case llm.APIFormatOpenAIChatCompletion,
+		llm.APIFormatOpenAIEmbedding,
+		llm.APIFormatOpenAIImageGeneration,
+		llm.APIFormatOpenAIImageEdit,
+		llm.APIFormatOpenAIImageVariation:
 		if bytes.Equal(event.Data, llm.DoneStreamEvent.Data) {
 			return true, nil
 		}
