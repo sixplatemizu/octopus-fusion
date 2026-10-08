@@ -164,6 +164,23 @@
             "hint": "Applied along with the channel's own filter when fetching models (AND); empty means no filter"
         },
         "saved": "Saved",
+        "sidecar": {
+            "title": "Zen Sidecar",
+            "disabled": "Sidecar disabled (sidecar.enabled=false). Enable in data/config.json and restart.",
+            "status": "Status",
+            "running": "Running ({exposed}/{total} models)",
+            "stopped": "Stopped",
+            "keys": "Zen {zen} · Go {go} · anonymous {anonymous}",
+            "on": "on",
+            "off": "off",
+            "anonymous": "Anonymous free first",
+            "zenKeys": "Zen Key",
+            "zenKeysPlaceholder": "Empty means anonymous only",
+            "goKeys": "Go Key",
+            "goKeysPlaceholder": "Optional",
+            "prefer": "Tier preference",
+            "hint": "Anonymous/preference/retry apply instantly; listen addresses need sidecar restart. Reasoning defaults to high; auto costs quota."
+        },
         "backup": {
             "title": "Backup / Restore",
             "export": {

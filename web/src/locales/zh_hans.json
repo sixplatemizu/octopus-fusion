@@ -164,6 +164,23 @@
             "hint": "渠道获取模型时与渠道自身的过滤表达式同时生效（AND），留空不过滤"
         },
         "saved": "已保存",
+        "sidecar": {
+            "title": "Zen 侧车",
+            "disabled": "侧车未启用（sidecar.enabled=false），在 data/config.json 中开启后重启生效。",
+            "status": "运行状态",
+            "running": "运行中（{exposed}/{total} 个模型）",
+            "stopped": "未运行",
+            "keys": "Zen {zen} · Go {go} · 匿名{anonymous}",
+            "on": "开",
+            "off": "关",
+            "anonymous": "匿名免费优先",
+            "zenKeys": "Zen Key",
+            "zenKeysPlaceholder": "留空则纯匿名",
+            "goKeys": "Go Key",
+            "goKeysPlaceholder": "选填",
+            "prefer": "Tier 偏好",
+            "hint": "匿名/偏好/重试即时生效；监听地址与管理端口改动需重启侧车。reasoning 默认 high，auto 可选但耗额度。"
+        },
         "backup": {
             "title": "备份 / 恢复",
             "export": {

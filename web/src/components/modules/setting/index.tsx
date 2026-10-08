@@ -6,6 +6,7 @@ import { SettingAccount } from './Account';
 import { SettingInfo } from './Info';
 import { SettingLog } from './Log';
 import { SettingBackup } from './Backup';
+import { SettingSidecar } from './Sidecar';
 
 // Setting 渲染设置页面正文。
 export function Setting() {
@@ -16,6 +17,7 @@ export function Setting() {
                 <SettingAppearance />
                 <SettingAccount />
                 <SettingSystem />
+                <SettingSidecar />
                 <SettingLog />
                 <SettingLLMPrice />
                 <SettingAPIKey />
