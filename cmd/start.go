@@ -5,6 +5,7 @@ import (
 	"github.com/bestruirui/octopus/internal/db"
 	"github.com/bestruirui/octopus/internal/op"
 	"github.com/bestruirui/octopus/internal/server"
+	"github.com/bestruirui/octopus/internal/sidecar"
 	"github.com/bestruirui/octopus/internal/task"
 	"github.com/bestruirui/octopus/internal/utils/shutdown"
 	"github.com/charmbracelet/log"
@@ -47,6 +48,15 @@ var startCmd = &cobra.Command{
 			return
 		}
 		shutdown.Register(server.Close)
+
+		if conf.AppConfig.Sidecar.Enabled {
+			sc := sidecar.New(conf.AppConfig.Sidecar.Binary, conf.AppConfig.Sidecar.APIAddr, conf.AppConfig.Sidecar.Config)
+			if err := sc.Start(conf.AppConfig.Sidecar.AdminAddr); err != nil {
+				log.Errorf("sidecar start error: %v", err)
+				return
+			}
+			shutdown.Register(sc.Close)
+		}
 
 		task.Init()
 		go task.RUN()

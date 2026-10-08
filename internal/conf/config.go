@@ -23,10 +23,20 @@ type Database struct {
 	Path string `mapstructure:"path"`
 }
 
+// Sidecar 管 Zen 侧车进程：是否启用、二进制路径、API 与管理口监听地址、配置文件路径。
+type Sidecar struct {
+	Enabled   bool   `mapstructure:"enabled"`
+	Binary    string `mapstructure:"binary"`
+	APIAddr   string `mapstructure:"api_addr"`
+	AdminAddr string `mapstructure:"admin_addr"`
+	Config    string `mapstructure:"config"`
+}
+
 type Config struct {
 	Server   Server   `mapstructure:"server"`
 	Log      Log      `mapstructure:"log"`
 	Database Database `mapstructure:"database"`
+	Sidecar  Sidecar  `mapstructure:"sidecar"`
 }
 
 var AppConfig Config
@@ -74,4 +84,9 @@ func setDefaults() {
 	viper.SetDefault("database.type", "sqlite")
 	viper.SetDefault("database.path", "data/data.db")
 	viper.SetDefault("log.level", "info")
+	viper.SetDefault("sidecar.enabled", false)
+	viper.SetDefault("sidecar.binary", "data/sidecar/opencode2api.exe")
+	viper.SetDefault("sidecar.api_addr", "127.0.0.1:8090")
+	viper.SetDefault("sidecar.admin_addr", "127.0.0.1:8091")
+	viper.SetDefault("sidecar.config", "data/sidecar/sidecar.json")
 }
