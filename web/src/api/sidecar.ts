@@ -45,3 +45,21 @@ export function useSetSidecarConfig() {
         },
     });
 }
+
+// useStartSidecar 运行时拉起：仅影响本轮运行，不改配置文件。
+export function useStartSidecar() {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: () => apiRequest<Record<string, unknown>>('/api/v1/sidecar/start', { method: 'POST' }),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ['sidecar', 'status'] }),
+    });
+}
+
+// useStopSidecar 运行时停止：重启后以配置文件 enabled 为准。
+export function useStopSidecar() {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: () => apiRequest<Record<string, unknown>>('/api/v1/sidecar/stop', { method: 'POST' }),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ['sidecar', 'status'] }),
+    });
+}

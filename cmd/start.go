@@ -13,6 +13,7 @@ import (
 )
 
 var cfgFile string
+var withO2a bool
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -49,13 +50,16 @@ var startCmd = &cobra.Command{
 		}
 		shutdown.Register(server.Close)
 
-		if conf.AppConfig.Sidecar.Enabled {
+		// --o2a 显式开启 Zen 侧车；默认关闭，以配置文件 sidecar.enabled 为准。
+		sidecarEnabled := conf.AppConfig.Sidecar.Enabled || withO2a
+		if sidecarEnabled {
 			sc := sidecar.New(conf.AppConfig.Sidecar.Binary, conf.AppConfig.Sidecar.APIAddr, conf.AppConfig.Sidecar.Config)
 			if err := sc.Start(conf.AppConfig.Sidecar.AdminAddr); err != nil {
 				log.Errorf("sidecar start error: %v", err)
 				return
 			}
 			shutdown.Register(sc.Close)
+			sidecar.SetGlobal(sc)
 		}
 
 		task.Init()
@@ -66,5 +70,6 @@ var startCmd = &cobra.Command{
 
 func init() {
 	startCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./data/config.json)")
+	startCmd.Flags().BoolVar(&withO2a, "o2a", false, "enable Zen sidecar (opencode2api) for this run")
 	rootCmd.AddCommand(startCmd)
 }

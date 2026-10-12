@@ -36,6 +36,33 @@ func New(binary, apiAddr, config string) *Manager {
 	}
 }
 
+// 全局实例，供 WebUI 运行时启停；仅在 start 流程拉起成功后设置。
+var (
+	globalMu sync.Mutex
+	global   *Manager
+)
+
+// SetGlobal 登记当前运行的侧车实例；nil 表示已停止。
+func SetGlobal(m *Manager) {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	global = m
+}
+
+// Global 返回当前侧车实例，未运行时返回 nil。
+func Global() *Manager {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	return global
+}
+
+// Running 报告侧车进程是否存活。
+func (m *Manager) Running() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cmd != nil && m.cmd.Process != nil && !m.stopped
+}
+
 // ensureConfig 侧车配置不存在时按匿名免费优先模板生成，local key 自动随机。
 func (m *Manager) ensureConfig(adminAddr string) error {
 	if _, err := os.Stat(m.config); err == nil {

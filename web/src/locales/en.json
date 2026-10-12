@@ -166,7 +166,12 @@
         "saved": "Saved",
         "sidecar": {
             "title": "Zen Sidecar",
-            "disabled": "Sidecar disabled (sidecar.enabled=false). Enable in data/config.json and restart.",
+            "disabled": "Sidecar disabled (sidecar.enabled=false). Start below for this run, enable in data/config.json + restart, or use ./octopus start --o2a once.",
+            "runtime": "This run",
+            "start": "Start sidecar",
+            "stop": "Stop sidecar",
+            "startedToast": "Sidecar started",
+            "stoppedToast": "Sidecar stopped (config file wins after restart)",
             "status": "Status",
             "running": "Running ({exposed}/{total} models)",
             "stopped": "Stopped",

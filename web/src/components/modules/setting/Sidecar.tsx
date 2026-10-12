@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useTranslations } from 'use-intl';
-import { Rocket, KeyRound, RefreshCw, Activity } from 'lucide-react';
+import { Rocket, KeyRound, RefreshCw, Activity, Power } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
-import { useSidecarStatus, useSidecarConfig, useSetSidecarConfig } from '@/api/sidecar';
+import { Button } from '@/components/ui/button';
+import { useSidecarStatus, useSidecarConfig, useSetSidecarConfig, useStartSidecar, useStopSidecar } from '@/api/sidecar';
 import { toast } from 'sonner';
 
 // SettingSidecar 渲染 Zen 侧车配置卡片：配置块 + 状态块 + 生效语义说明。
@@ -12,6 +13,8 @@ export function SettingSidecar() {
     const { data: status } = useSidecarStatus();
     const { data: config } = useSidecarConfig();
     const setConfig = useSetSidecarConfig();
+    const startSidecar = useStartSidecar();
+    const stopSidecar = useStopSidecar();
 
     const [anonymous, setAnonymous] = useState(true);
     const [zenKeys, setZenKeys] = useState('');
@@ -58,6 +61,37 @@ export function SettingSidecar() {
             {!status?.enabled && (
                 <p className="text-sm text-muted-foreground">{t('sidecar.disabled')}</p>
             )}
+
+            {/* 运行时启停：仅影响本轮运行，重启后以配置文件 enabled 为准 */}
+            <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                    <Power className="h-5 w-5 text-muted-foreground" />
+                    <span className="text-sm font-medium">{t('sidecar.runtime')}</span>
+                </div>
+                {status?.running ? (
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => stopSidecar.mutate(undefined, {
+                            onSuccess: () => toast.success(t('sidecar.stoppedToast')),
+                            onError: (e: unknown) => toast.error(e instanceof Error ? e.message : String(e)),
+                        })}
+                    >
+                        {t('sidecar.stop')}
+                    </Button>
+                ) : (
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => startSidecar.mutate(undefined, {
+                            onSuccess: () => toast.success(t('sidecar.startedToast')),
+                            onError: (e: unknown) => toast.error(e instanceof Error ? e.message : String(e)),
+                        })}
+                    >
+                        {t('sidecar.start')}
+                    </Button>
+                )}
+            </div>
 
             {status?.enabled && (
                 <>

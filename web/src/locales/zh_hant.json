@@ -166,7 +166,12 @@
         "saved": "已儲存",
         "sidecar": {
             "title": "Zen 側車",
-            "disabled": "側車未啟用（sidecar.enabled=false），在 data/config.json 中開啟後重啟生效。",
+            "disabled": "側車未啟用（sidecar.enabled=false），可用下方按鈕臨時啟動，或在 data/config.json 中開啟後重啟；也可用 ./octopus start --o2a 單次開啟。",
+            "runtime": "本輪運行",
+            "start": "啟動側車",
+            "stop": "停止側車",
+            "startedToast": "側車已啟動",
+            "stoppedToast": "側車已停止（重啟後以配置文件為準）",
             "status": "運行狀態",
             "running": "運行中（{exposed}/{total} 個模型）",
             "stopped": "未運行",

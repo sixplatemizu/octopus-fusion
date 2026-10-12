@@ -11,6 +11,7 @@ import (
 	"github.com/bestruirui/octopus/internal/server/middleware"
 	"github.com/bestruirui/octopus/internal/server/resp"
 	"github.com/bestruirui/octopus/internal/server/router"
+	"github.com/bestruirui/octopus/internal/sidecar"
 	"github.com/gin-gonic/gin"
 )
 
@@ -29,6 +30,14 @@ func init() {
 			router.NewRoute("/config", http.MethodPost).
 				Use(middleware.RequireJSON()).
 				Handle(setSidecarConfig),
+		).
+		AddRoute(
+			router.NewRoute("/start", http.MethodPost).
+				Handle(startSidecar),
+		).
+		AddRoute(
+			router.NewRoute("/stop", http.MethodPost).
+				Handle(stopSidecar),
 		)
 }
 
@@ -63,7 +72,11 @@ func getSidecarStatus(c *gin.Context) {
 		"enabled": conf.AppConfig.Sidecar.Enabled,
 		"running": false,
 	}
-	if !conf.AppConfig.Sidecar.Enabled {
+	// 运行时状态以实际进程为准：enabled 是启动意愿，running 是当前事实。
+	// 面板启停只影响本轮运行，重启后以配置文件 enabled 为准。
+	if sidecar.Global() != nil && sidecar.Global().Running() {
+		out["running"] = true
+	} else {
 		resp.Success(c, out)
 		return
 	}
@@ -187,4 +200,34 @@ func setSidecarConfig(c *gin.Context) {
 		return
 	}
 	resp.Success(c, sanitizeSidecarConfig(raw))
+}
+
+// startSidecar 运行时拉起侧车：仅影响本轮运行，不改配置文件。
+func startSidecar(c *gin.Context) {
+	if sidecar.Global() != nil && sidecar.Global().Running() {
+		resp.Error(c, http.StatusBadRequest, "sidecar already running")
+		return
+	}
+	sc := sidecar.New(conf.AppConfig.Sidecar.Binary, conf.AppConfig.Sidecar.APIAddr, conf.AppConfig.Sidecar.Config)
+	if err := sc.Start(conf.AppConfig.Sidecar.AdminAddr); err != nil {
+		resp.Error(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sidecar.SetGlobal(sc)
+	resp.Success(c, map[string]any{"running": true})
+}
+
+// stopSidecar 运行时停止侧车：仅影响本轮运行，重启后以配置文件 enabled 为准。
+func stopSidecar(c *gin.Context) {
+	m := sidecar.Global()
+	if m == nil || !m.Running() {
+		resp.Error(c, http.StatusBadRequest, "sidecar not running")
+		return
+	}
+	if err := m.Close(); err != nil {
+		resp.Error(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sidecar.SetGlobal(nil)
+	resp.Success(c, map[string]any{"running": false})
 }
