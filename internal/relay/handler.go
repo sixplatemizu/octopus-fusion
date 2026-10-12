@@ -129,7 +129,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 		lastChannel := "" // 最新一轮的渠道名称，终态行使用。
 		lastModel := ""   // 最新一轮实际请求上游的模型名称，终态行使用。
 		done := func(success bool, status Status, usage *llm.Usage, errText string) {
-			logRelayDone(request.ID, metadata.Model, lastChannelID, lastChannel, lastModel, success, status, request.StartedAt, usage, errText, rounds)
+			logRelayDone(request.ID, metadata.Model, lastChannelID, lastChannel, lastModel, success, status, request.StartedAt, usage, errText, rounds, reasoningEffort)
 		}
 
 		for {
@@ -232,7 +232,7 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 			}
 			request.startRound(cancelRound, channel.Name+" · "+channelKey.Name, channelModel.Name, targetProtocol)
 			rounds++
-			logForwarding(request.ID, metadata.Model, group.Mode, channel.ID, channel.Name, channelModel.Name, rounds, metadata.Streaming)
+			logForwarding(request.ID, metadata.Model, group.Mode, channel.ID, channel.Name, channelModel.Name, rounds, metadata.Streaming, reasoningEffort)
 
 			roundStartedAt := time.Now() // 本轮上游调用的开始时间, 用于统计首个有效响应耗时。
 
