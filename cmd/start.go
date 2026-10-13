@@ -50,9 +50,8 @@ var startCmd = &cobra.Command{
 		}
 		shutdown.Register(server.Close)
 
-		// --o2a 显式开启 Zen 侧车；默认关闭，以配置文件 sidecar.enabled 为准。
-		sidecarEnabled := conf.AppConfig.Sidecar.Enabled || withO2a
-		if sidecarEnabled {
+		// 侧车默认关闭：仅 --o2a 拉起本轮；无参时绝不自动拉起（配置 enabled 仅面板展示，不参与启动决策）。
+		if withO2a {
 			sc := sidecar.New(conf.AppConfig.Sidecar.Binary, conf.AppConfig.Sidecar.APIAddr, conf.AppConfig.Sidecar.Config)
 			if err := sc.Start(conf.AppConfig.Sidecar.AdminAddr); err != nil {
 				log.Errorf("sidecar start error: %v", err)
