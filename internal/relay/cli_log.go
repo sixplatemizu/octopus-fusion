@@ -12,10 +12,10 @@ import (
 // 成功走 Info，失败/取消走 Warn；默认 info 级别两者都显示，warn 级别只显示失败。
 
 // logForwarding 记录本轮选路，对应旧版 forwarding to channel 行。
-// effort 为客户端声明的思考强度（空表示未声明），供判断透传链路是否携带思考参数。
+// effort 为客户端声明的思考强度（- 表示未声明或解析失败），供判断透传链路是否携带思考参数。
 func logForwarding(requestID uint64, modelName string, mode model.GroupMode, channelID int, channelName, targetModel string, round int, streaming bool, effort string) {
 	log.Infof("[octopus] request #%d model=%s mode=%s forwarding to channel=%d(%s) model=%s (round %d, stream=%t, effort=%s)",
-		requestID, modelName, mode, channelID, channelName, targetModel, round, streaming, effort)
+		requestID, modelName, mode, channelID, channelName, targetModel, round, streaming, normalizeEffort(effort))
 }
 
 // logRoundFailed 记录一轮上游失败（后续重试或冷却），对应旧版 channel failed 行。
@@ -27,6 +27,14 @@ func logRoundFailed(requestID uint64, round, channelID int, channelName, targetM
 // logReject 记录尚未登记请求状态即被拒绝的调用。
 func logReject(modelName string, err error) {
 	log.Warnf("[octopus] reject model=%s error=%s", modelName, err)
+}
+
+// normalizeEffort 归一化思考强度：空串记 -，与真实声明值区分。
+func normalizeEffort(effort string) string {
+	if effort == "" {
+		return "-"
+	}
+	return effort
 }
 
 // logRelayDone 记录请求终态，对应旧版 relay complete 行。
@@ -45,6 +53,7 @@ func logRelayDone(requestID uint64, modelName string, channelID int, channelName
 			reasoning = usage.CompletionTokensDetails.ReasoningTokens
 		}
 	}
+	effort = normalizeEffort(effort)
 	if success {
 		log.Infof("[octopus] relay complete: id=%d model=%s channel=%d(%s) actual_model=%s success=true duration=%dms input_token=%d output_token=%d reasoning_tokens=%d input_cost=%f output_cost=%f total_cost=%f rounds=%d effort=%s",
 			requestID, modelName, channelID, channelName, targetModel, duration, in, out, reasoning, metrics.InputCost, metrics.OutputCost, total, rounds, effort)

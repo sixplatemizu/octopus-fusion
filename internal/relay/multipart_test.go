@@ -167,6 +167,8 @@ func TestRewriteMultipartRequestModel(t *testing.T) {
 }
 
 func TestApplyChannelConfigSkipsMultipart(t *testing.T) {
+	// applyChannelConfig 对 multipart 整体跳过参数覆盖（表单非 JSON，无覆盖语义），
+	// 自定义 Header 仍追加；此处不断言 Header，只验证 body 未被 sjson 改动。
 	image := []byte{0x01, 0x02, 0x03}
 	body, ct := buildMultipartBody(t, "mock-group", "false", image)
 	raw := newMultipartRequest(t, body, ct)

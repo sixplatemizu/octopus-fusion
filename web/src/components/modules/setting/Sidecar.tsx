@@ -3,7 +3,6 @@ import { useTranslations } from 'use-intl';
 import { Rocket, KeyRound, RefreshCw, Activity, Power } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
-import { Button } from '@/components/ui/button';
 import { useSidecarStatus, useSidecarConfig, useSetSidecarConfig, useStartSidecar, useStopSidecar } from '@/api/sidecar';
 import { toast } from 'sonner';
 
@@ -47,6 +46,21 @@ export function SettingSidecar() {
     const splitKeys = (s: string) =>
         s.split(/[,，\n]/).map(x => x.trim()).filter(Boolean);
 
+    const running = status?.running ?? false;
+
+    const toggleRuntime = (v: boolean) => {
+        if (v) {
+            startSidecar.mutate(undefined, {
+                onSuccess: () => toast.success(t('sidecar.startedToast')),
+                onError: (e: unknown) => toast.error(e instanceof Error ? e.message : String(e)),
+            });
+        } else {
+            stopSidecar.mutate(undefined, {
+                onSuccess: () => toast.success(t('sidecar.stoppedToast')),
+                onError: (e: unknown) => toast.error(e instanceof Error ? e.message : String(e)),
+            });
+        }
+    };
     const health = status?.health;
     const models = health?.models;
     const keys = health?.keys;
@@ -58,42 +72,24 @@ export function SettingSidecar() {
                 {t('sidecar.title')}
             </h2>
 
-            {!status?.enabled && (
+            {!running && (
                 <p className="text-sm text-muted-foreground">{t('sidecar.disabled')}</p>
             )}
 
-            {/* 运行时启停：仅影响本轮运行，重启后以配置文件 enabled 为准 */}
+            {/* 运行时开关：开即启动，关即停止；默认关闭，仅影响本轮运行 */}
             <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
                     <Power className="h-5 w-5 text-muted-foreground" />
                     <span className="text-sm font-medium">{t('sidecar.runtime')}</span>
                 </div>
-                {status?.running ? (
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => stopSidecar.mutate(undefined, {
-                            onSuccess: () => toast.success(t('sidecar.stoppedToast')),
-                            onError: (e: unknown) => toast.error(e instanceof Error ? e.message : String(e)),
-                        })}
-                    >
-                        {t('sidecar.stop')}
-                    </Button>
-                ) : (
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => startSidecar.mutate(undefined, {
-                            onSuccess: () => toast.success(t('sidecar.startedToast')),
-                            onError: (e: unknown) => toast.error(e instanceof Error ? e.message : String(e)),
-                        })}
-                    >
-                        {t('sidecar.start')}
-                    </Button>
-                )}
+                <Switch
+                    checked={running}
+                    onCheckedChange={toggleRuntime}
+                    disabled={startSidecar.isPending || stopSidecar.isPending}
+                />
             </div>
 
-            {status?.enabled && (
+            {running && (
                 <>
                     {/* 运行状态 */}
                     <div className="flex items-center justify-between gap-4">
@@ -102,9 +98,7 @@ export function SettingSidecar() {
                             <span className="text-sm font-medium">{t('sidecar.status')}</span>
                         </div>
                         <span className="text-sm text-muted-foreground">
-                            {status?.running
-                                ? t('sidecar.running', { models: models?.exposed ?? 0, total: models?.total ?? 0 })
-                                : (status?.error ?? t('sidecar.stopped'))}
+                            {status?.error ?? t('sidecar.running', { models: models?.exposed ?? 0, total: models?.total ?? 0 })}
                         </span>
                     </div>
                     {keys && (

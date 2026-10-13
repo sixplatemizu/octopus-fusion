@@ -3,9 +3,9 @@ import { apiRequest } from './client';
 
 /**
  * Zen 侧车状态（经 octopus 后端反代，不直连侧车）。
+ * running 为当前事实：进程存活且探活通过才为 true；无启用开关，默认关闭。
  */
 export interface SidecarStatus {
-    enabled: boolean;
     running: boolean;
     error?: string;
     health?: {
@@ -55,7 +55,7 @@ export function useStartSidecar() {
     });
 }
 
-// useStopSidecar 运行时停止：重启后以配置文件 enabled 为准。
+// useStopSidecar 运行时停止：默认关闭，下次启动仍需 --o2a 或手动打开开关。
 export function useStopSidecar() {
     const queryClient = useQueryClient();
     return useMutation({

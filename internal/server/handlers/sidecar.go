@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bestruirui/octopus/internal/conf"
@@ -12,6 +14,7 @@ import (
 	"github.com/bestruirui/octopus/internal/server/resp"
 	"github.com/bestruirui/octopus/internal/server/router"
 	"github.com/bestruirui/octopus/internal/sidecar"
+	"github.com/bestruirui/octopus/internal/utils/shutdown"
 	"github.com/gin-gonic/gin"
 )
 
@@ -53,30 +56,20 @@ func sidecarHTTP(method, path string) (int, []byte, error) {
 		return 0, nil, err
 	}
 	defer r.Body.Close()
-	buf := make([]byte, 0, 4096)
-	tmp := make([]byte, 4096)
-	for {
-		n, err := r.Body.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-		}
-		if err != nil {
-			break
-		}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return 0, nil, err
 	}
-	return r.StatusCode, buf, nil
+	return r.StatusCode, body, nil
 }
 
 func getSidecarStatus(c *gin.Context) {
+	// running 是当前事实：进程存活且探活通过才为 true。
+	// 侧车默认关闭：--o2a 或面板启动仅影响本轮运行，重启后默认关闭。
 	out := map[string]any{
-		"enabled": conf.AppConfig.Sidecar.Enabled,
 		"running": false,
 	}
-	// 运行时状态以实际进程为准：enabled 是启动意愿，running 是当前事实。
-	// 面板启停只影响本轮运行，重启后以配置文件 enabled 为准。
-	if sidecar.Global() != nil && sidecar.Global().Running() {
-		out["running"] = true
-	} else {
+	if sidecar.Global() == nil || !sidecar.Global().Healthy() {
 		resp.Success(c, out)
 		return
 	}
@@ -202,8 +195,13 @@ func setSidecarConfig(c *gin.Context) {
 	resp.Success(c, sanitizeSidecarConfig(raw))
 }
 
-// startSidecar 运行时拉起侧车：仅影响本轮运行，不改配置文件。
+// sidecarLifecycleMu 串行化运行时启停：检查-拉起-登记非原子，加锁防连点拉起多个进程。
+var sidecarLifecycleMu sync.Mutex
+
+// startSidecar 运行时拉起侧车：仅影响本轮运行，退出时由 shutdown 带走，不写配置文件。
 func startSidecar(c *gin.Context) {
+	sidecarLifecycleMu.Lock()
+	defer sidecarLifecycleMu.Unlock()
 	if sidecar.Global() != nil && sidecar.Global().Running() {
 		resp.Error(c, http.StatusBadRequest, "sidecar already running")
 		return
@@ -213,12 +211,15 @@ func startSidecar(c *gin.Context) {
 		resp.Error(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	shutdown.Register(sc.Close)
 	sidecar.SetGlobal(sc)
 	resp.Success(c, map[string]any{"running": true})
 }
 
-// stopSidecar 运行时停止侧车：仅影响本轮运行，重启后以配置文件 enabled 为准。
+// stopSidecar 运行时停止侧车：仅影响本轮运行；默认关闭，下次启动仍需 --o2a 或手动启动。
 func stopSidecar(c *gin.Context) {
+	sidecarLifecycleMu.Lock()
+	defer sidecarLifecycleMu.Unlock()
 	m := sidecar.Global()
 	if m == nil || !m.Running() {
 		resp.Error(c, http.StatusBadRequest, "sidecar not running")

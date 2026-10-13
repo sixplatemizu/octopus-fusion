@@ -56,11 +56,22 @@ func Global() *Manager {
 	return global
 }
 
-// Running 报告侧车进程是否存活。
+// Running 报告侧车进程是否存活（只看进程，不探活）。
 func (m *Manager) Running() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cmd != nil && m.cmd.Process != nil && !m.stopped
+}
+
+// probeClient 复用探活连接，省去高频探活的建连开销。
+var probeClient = &http.Client{Timeout: 3 * time.Second}
+
+// Healthy 报告侧车是否真正可用：进程存活且 /healthz 探活通过。
+func (m *Manager) Healthy() bool {
+	if !m.Running() {
+		return false
+	}
+	return m.healthy()
 }
 
 // ensureConfig 侧车配置不存在时按匿名免费优先模板生成，local key 自动随机。
@@ -196,8 +207,7 @@ func (m *Manager) runOnce() error {
 }
 
 func (m *Manager) healthy() bool {
-	client := http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://" + m.apiAddr + "/healthz")
+	resp, err := probeClient.Get("http://" + m.apiAddr + "/healthz")
 	if err != nil {
 		return false
 	}
