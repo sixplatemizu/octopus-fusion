@@ -2,6 +2,7 @@ package relay
 
 import (
 	"maps"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 // RouteState 是一个分组的进程内路由状态; 跨该分组的全部请求共享。
 // 同时作为路由流的消息形状与分组读取响应中的 runtime 字段: 冷却, 探测与亲和都是本包路由算法的概念,
 // 故状态形状由本包定义, 分组的持久化配置不含它; 内部标志未导出, 不会随消息出到 JSON。
-// 两种模式共用 CurrentItemID: 手动模式下即人工指定的成员, 故障转移模式下由路由决定,
+// 手动模式与自动路由模式共用 CurrentItemID: 手动模式下即人工指定的成员, 自动模式下由路由决定,
 // 前端由此只读这一个字段即可知道当前承载请求的成员, 无需再按模式分支。
 type RouteState struct {
 	GroupID       int           `json:"group_id"`        // 状态所属的分组 ID, 供状态流按分组定位。
@@ -20,7 +21,8 @@ type RouteState struct {
 	AffinityUntil int64         `json:"affinity_until"`  // 当前路由的亲和截止 Unix 毫秒时间, 0 表示无亲和; 手动模式恒为 0。
 	Cooldowns     map[int]int64 `json:"cooldowns"`       // 失败成员 ID 对应的冷却截止 Unix 毫秒时间, 已到期的条目由前端按当前时间忽略。
 
-	affinityArmed bool // 当前路由下一次成功后是否开始亲和, 仅故障切换后为真。
+	affinityArmed    bool   // 当前路由下一次成功后是否开始亲和, 仅故障切换后为真。
+	roundRobinCursor uint64 // 轮转模式的下一个起始序号, 每个分组独立计数。
 }
 
 const routeStreamBuffer = 16 // 单个路由流连接的非阻塞消息缓冲容量。
@@ -84,6 +86,14 @@ func pickGroupItem(group model.Group) model.GroupItem {
 		route.AffinityUntil = 0
 	}
 
+	if group.Mode == model.GroupModeFailover {
+		return pickFailoverItemLocked(group, route, now)
+	}
+	return pickOrderedItemLocked(group, route, now)
+}
+
+// pickFailoverItemLocked 故障转移: 按优先级取首个可用成员, 亲和期内沿用当前成员; 调用方必须持有 routeMu。
+func pickFailoverItemLocked(group model.Group, route *RouteState, now int64) model.GroupItem {
 	// 亲和期内沿用当前成员, 不提前探测已恢复的高优先级成员。
 	if route.CurrentItemID != 0 && route.AffinityUntil > now {
 		return itemOf(group, route.CurrentItemID)
@@ -117,6 +127,94 @@ func pickGroupItem(group model.Group) model.GroupItem {
 	return model.GroupItem{}
 }
 
+// pickOrderedItemLocked 轮转/随机/加权: 候选先按模式排序, 再套用与故障转移相同的冷却与探测约束; 调用方必须持有 routeMu。
+func pickOrderedItemLocked(group model.Group, route *RouteState, now int64) model.GroupItem {
+	for _, item := range orderCandidatesLocked(group, route) {
+		deadline, cooling := route.Cooldowns[item.ID]
+		if cooling && deadline > now {
+			continue
+		}
+		// 冷却已到期的成员只放行一个探测请求, 避免全部请求同时涌向尚未恢复的成员。
+		if cooling {
+			if route.ProbeItemID != 0 {
+				continue
+			}
+			route.ProbeItemID = item.ID
+			publishRouteLocked(route)
+			return item
+		}
+		route.CurrentItemID = item.ID
+		publishRouteLocked(route)
+		return item
+	}
+	if route.CurrentItemID != 0 {
+		return itemOf(group, route.CurrentItemID)
+	}
+	return model.GroupItem{}
+}
+
+// orderCandidatesLocked 按轮转/随机/加权模式给出候选顺序; 调用方必须持有 routeMu。
+func orderCandidatesLocked(group model.Group, route *RouteState) []model.GroupItem {
+	n := len(group.Items)
+	if n == 0 {
+		return nil
+	}
+	switch group.Mode {
+	case model.GroupModeRoundRobin:
+		start := int(route.roundRobinCursor % uint64(n))
+		route.roundRobinCursor++
+		ordered := make([]model.GroupItem, n)
+		for i := 0; i < n; i++ {
+			ordered[i] = group.Items[(start+i)%n]
+		}
+		return ordered
+	case model.GroupModeRandom:
+		ordered := make([]model.GroupItem, n)
+		copy(ordered, group.Items)
+		rand.Shuffle(n, func(i, j int) {
+			ordered[i], ordered[j] = ordered[j], ordered[i]
+		})
+		return ordered
+	case model.GroupModeWeighted:
+		return weightedOrder(group.Items)
+	default:
+		return group.Items
+	}
+}
+
+// weightedOrder 加权不放回抽取: 每轮按剩余成员的权重占比抽取, 权重越高的成员越可能排在前面。
+func weightedOrder(items []model.GroupItem) []model.GroupItem {
+	remaining := make([]model.GroupItem, len(items))
+	copy(remaining, items)
+	ordered := make([]model.GroupItem, 0, len(items))
+	for len(remaining) > 0 {
+		total := 0
+		for _, item := range remaining {
+			total += itemWeight(item)
+		}
+		pick := rand.IntN(total)
+		index := 0
+		for i, item := range remaining {
+			pick -= itemWeight(item)
+			if pick < 0 {
+				index = i
+				break
+			}
+		}
+		ordered = append(ordered, remaining[index])
+		remaining = append(remaining[:index], remaining[index+1:]...)
+	}
+	return ordered
+}
+
+// itemWeight 返回成员的抽取权重, 小于 1 按 1 处理。
+func itemWeight(item model.GroupItem) int {
+	if item.Weight < 1 {
+		return 1
+	}
+	return item.Weight
+}
+
 // recordRouteSuccess 上报一轮成功: 结束该成员的冷却与探测占用, 并在故障切换后按配置开始亲和。
 func recordRouteSuccess(group model.Group, itemID int) {
 	if group.Mode == model.GroupModeManual {
@@ -143,8 +241,8 @@ func recordRouteSuccess(group model.Group, itemID int) {
 		}
 		changed = true
 	}
-	// 亲和只在故障切换后的首次成功时开始, 使请求在一段时间内稳定留在备用成员上。
-	if route.CurrentItemID == itemID && route.affinityArmed {
+	// 亲和只在故障转移后的首次成功时开始, 使请求在一段时间内稳定留在备用成员上。
+	if group.Mode == model.GroupModeFailover && route.CurrentItemID == itemID && route.affinityArmed {
 		route.affinityArmed = false
 		if group.RelayConfig.MemberAffinitySeconds > 0 {
 			route.AffinityUntil = now + int64(group.RelayConfig.MemberAffinitySeconds)*1000
@@ -184,7 +282,7 @@ func recordRouteFailure(group model.Group, itemID, failures int) bool {
 	if route.CurrentItemID == itemID {
 		route.CurrentItemID = 0
 		route.AffinityUntil = 0
-		route.affinityArmed = true
+		route.affinityArmed = group.Mode == model.GroupModeFailover
 	}
 	publishRouteLocked(route)
 	return true

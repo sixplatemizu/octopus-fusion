@@ -4,8 +4,8 @@ import { apiRequest } from './client';
 import { queryClient } from './client';
 import { groupListQueryOptions } from './queries';
 
-// GroupMode 表示分组的手动或故障转移路由模式。
-export type GroupMode = 'manual' | 'failover';
+// GroupMode 表示分组的路由模式：手动、故障转移、轮转、随机与加权。
+export type GroupMode = 'manual' | 'failover' | 'round_robin' | 'random' | 'weighted';
 
 // GroupRelayConfig 保存分组 Relay 配置。
 export interface GroupRelayConfig {
@@ -24,6 +24,7 @@ export interface GroupItem {
     group_id: number;
     channel_grant_id: number;
     priority: number;
+    weight: number; // 加权模式的抽取权重，小于 1 按 1 处理。
     channel_id: number;
     channel_name: string;
     model_name: string;
@@ -55,6 +56,7 @@ export interface Group {
 // GroupItemInput 是提交的成员，按渠道授权主键引用；提交顺序即优先级顺序。
 export interface GroupItemInput {
     channel_grant_id: number;
+    weight?: number; // 加权模式的抽取权重，留空按 1 处理。
 }
 
 // GroupCreateRequest 是创建分组的请求。

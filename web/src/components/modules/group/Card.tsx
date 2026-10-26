@@ -71,6 +71,7 @@ export const GroupCard = memo(function GroupCard({ group, now }: { group: Group;
             channel_name: item.channel_name,
             key_name: item.key_name,
             protocols: item.protocols,
+            weight: item.weight,
             item_id: item.id,
         })),
         [group.items]
@@ -89,7 +90,7 @@ export const GroupCard = memo(function GroupCard({ group, now }: { group: Group;
     // 成员为整体替换, 拖拽与移除都直接提交当前排列, 优先级由提交顺序决定。
     const submitMembers = useCallback((next: SelectedMember[]) => {
         updateGroup.mutate(
-            { id: group.id, items: next.map((m) => ({ channel_grant_id: m.channel_grant_id })) },
+            { id: group.id, items: next.map((m) => ({ channel_grant_id: m.channel_grant_id, weight: m.weight ?? 1 })) },
             { onSuccess, onError },
         );
     }, [group.id, updateGroup, onSuccess, onError]);
@@ -120,11 +121,14 @@ export const GroupCard = memo(function GroupCard({ group, now }: { group: Group;
             values.relay_config.member_cooldown_seconds !== group.relay_config.member_cooldown_seconds ||
             values.relay_config.member_affinity_seconds !== group.relay_config.member_affinity_seconds
         ) payload.relay_config = values.relay_config;
-        // 成员集合与顺序有任一处不同就整体提交; 后端按授权主键匹配, 已有成员保留其主键与统计。
-        const nextGrantIDs = values.members.map((m) => m.channel_grant_id);
-        const currentGrantIDs = (group.items || []).map((item) => item.channel_grant_id);
-        if (nextGrantIDs.length !== currentGrantIDs.length || nextGrantIDs.some((id, i) => id !== currentGrantIDs[i])) {
-            payload.items = nextGrantIDs.map((channel_grant_id) => ({ channel_grant_id }));
+        // 成员集合、顺序与权重有任一处不同就整体提交; 后端按授权主键匹配, 已有成员保留其主键与统计。
+        const nextItems = values.members.map((m) => ({ channel_grant_id: m.channel_grant_id, weight: m.weight ?? 1 }));
+        const currentItems = (group.items || []).map((item) => ({ channel_grant_id: item.channel_grant_id, weight: item.weight ?? 1 }));
+        if (
+            nextItems.length !== currentItems.length ||
+            nextItems.some((item, i) => item.channel_grant_id !== currentItems[i].channel_grant_id || item.weight !== currentItems[i].weight)
+        ) {
+            payload.items = nextItems;
         }
 
         if (Object.keys(payload).length === 1) {

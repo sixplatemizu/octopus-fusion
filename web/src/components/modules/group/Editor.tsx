@@ -249,12 +249,16 @@ function SortSection({
     onRemove,
     removingIds,
     onClear,
+    weighted,
+    onWeightChange,
 }: {
     members: SelectedMember[];
     onReorder: (members: SelectedMember[]) => void;
     onRemove: (id: string) => void;
     removingIds: Set<string>;
     onClear: () => void;
+    weighted: boolean;
+    onWeightChange: (id: string, weight: number) => void;
 }) {
     const t = useTranslations('group');
 
@@ -292,6 +296,8 @@ function SortSection({
                     onRemove={onRemove}
                     removingIds={removingIds}
                     showConfirmDelete={false}
+                    weighted={weighted}
+                    onWeightChange={onWeightChange}
                 />
             </div>
         </div>
@@ -332,7 +338,7 @@ export function GroupEditor({
     })), [grantCandidates]);
 
     const [groupName, setGroupName] = useState(initial?.name ?? '');
-    const [mode, setMode] = useState<GroupMode>(initial?.mode ?? 'manual');
+    const [mode, setMode] = useState<GroupMode>(initial?.mode ?? 'failover');
     const [relayConfig, setRelayConfig] = useState<GroupRelayConfig>(() => ({
         ...defaultRelayConfig,
         ...initial?.relay_config,
@@ -385,6 +391,10 @@ export function GroupEditor({
         setRemovingIds(new Set());
     }, []);
 
+    const handleWeightChange = useCallback((id: string, weight: number) => {
+        setSelectedMembers((prev) => prev.map((member) => (member.id === id ? { ...member, weight } : member)));
+    }, []);
+
     const isValid = groupKey.length > 0 && selectedMembers.length > 0;
 
     const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -426,8 +436,11 @@ export function GroupEditor({
                                     <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
-                                    <SelectItem value="manual">{t('form.manual')}</SelectItem>
                                     <SelectItem value="failover">{t('form.failover')}</SelectItem>
+                                    <SelectItem value="round_robin">{t('form.round_robin')}</SelectItem>
+                                    <SelectItem value="random">{t('form.random')}</SelectItem>
+                                    <SelectItem value="weighted">{t('form.weighted')}</SelectItem>
+                                    <SelectItem value="manual">{t('form.manual')}</SelectItem>
                                 </SelectContent>
                             </Select>
                         </Field>
@@ -454,6 +467,8 @@ export function GroupEditor({
                                     onRemove={handleRemoveMember}
                                     removingIds={removingIds}
                                     onClear={handleClearMembers}
+                                    weighted={mode === 'weighted'}
+                                    onWeightChange={handleWeightChange}
                                 />
                             </div>
                         </TabsContent>

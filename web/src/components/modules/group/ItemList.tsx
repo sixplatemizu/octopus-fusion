@@ -11,6 +11,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/lib/utils';
 import { getModelIcon } from '@/lib/model-icons';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Input } from '@/components/ui/input';
 import { IconButton } from '@/components/common/IconButton';
 import { useTranslations } from 'use-intl';
 import type { Group } from '@/api/group';
@@ -25,6 +26,7 @@ export interface SelectedMember {
     channel_name: string;
     key_name: string;
     protocols: number;
+    weight?: number; // 加权模式的抽取权重，仅编辑时提交。
     item_id?: number;
 }
 
@@ -56,6 +58,8 @@ function MemberItem({
     isRemoving,
     showConfirmDelete = true,
     layoutScope,
+    weighted = false,
+    onWeightChange,
     dnd,
 }: {
     member: SelectedMember;
@@ -70,6 +74,8 @@ function MemberItem({
     isRemoving?: boolean;
     showConfirmDelete?: boolean;
     layoutScope?: string;
+    weighted?: boolean; // 加权模式时展示权重输入框。
+    onWeightChange?: (id: string, weight: number) => void;
     dnd: MemberItemDnd;
 }) {
     const t = useTranslations('group');
@@ -147,6 +153,22 @@ function MemberItem({
                 </div>
 
                 {group && <MemberStatus group={group} itemId={member.item_id} now={now} active={isActive} activeClassName="p-1" />}
+
+                {weighted && !group && (
+                    <div
+                        className="flex items-center gap-1 shrink-0"
+                        onClick={(event) => event.stopPropagation()}
+                    >
+                        <Input
+                            type="number"
+                            min={1}
+                            value={member.weight ?? 1}
+                            title={t('form.weight')}
+                            onChange={(event) => onWeightChange?.(member.id, Math.max(1, Number(event.target.value) || 1))}
+                            className="h-6 w-14 rounded px-1 text-xs"
+                        />
+                    </div>
+                )}
 
                 {!group && (
                     <>
@@ -258,6 +280,8 @@ interface MemberListProps {
      */
     showConfirmDelete?: boolean;
     layoutScope?: string;
+    weighted?: boolean; // 加权模式时展示权重输入框。
+    onWeightChange?: (id: string, weight: number) => void;
 }
 
 export function MemberList({
@@ -275,6 +299,8 @@ export function MemberList({
     removingIds = new Set(),
     showConfirmDelete = true,
     layoutScope: externalLayoutScope,
+    weighted = false,
+    onWeightChange,
 }: MemberListProps) {
     const internalLayoutScope = useId();
     const layoutScope = externalLayoutScope ?? internalLayoutScope;
@@ -405,6 +431,8 @@ export function MemberList({
                                                 isRemoving={removingIds.has(member.id)}
                                                 showConfirmDelete={showConfirmDelete}
                                                 layoutScope={layoutScope}
+                                                weighted={weighted}
+                                                onWeightChange={onWeightChange}
                                                 dnd={{
                                                     innerRef: draggableProvided.innerRef,
                                                     draggableProps: draggableProvided.draggableProps,

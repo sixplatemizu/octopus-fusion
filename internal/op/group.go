@@ -83,11 +83,11 @@ func GroupCreate(req *model.GroupCreateRequest, ctx context.Context) (*model.Gro
 		Items:       make([]model.GroupItem, len(req.Items)),
 	}
 	if group.Mode == "" {
-		group.Mode = model.GroupModeManual
+		group.Mode = model.GroupModeFailover
 	}
 	model.NormalizeGroupRelayConfig(&group.RelayConfig)
 	for i, item := range req.Items {
-		group.Items[i] = model.GroupItem{ChannelGrantID: item.ChannelGrantID, Priority: i + 1}
+		group.Items[i] = model.GroupItem{ChannelGrantID: item.ChannelGrantID, Priority: i + 1, Weight: normalizeGroupItemWeight(item.Weight)}
 	}
 	if err := db.GetDB().WithContext(ctx).Create(&group).Error; err != nil {
 		return nil, err
@@ -169,6 +169,14 @@ func GroupUpdate(id int, req *model.GroupUpdateRequest, ctx context.Context) (*m
 	return &snapshot, nil
 }
 
+// normalizeGroupItemWeight 归一化成员权重: 留空或小于 1 按 1 处理, 避免加权抽取出现零权重。
+func normalizeGroupItemWeight(weight int) int {
+	if weight < 1 {
+		return 1
+	}
+	return weight
+}
+
 // syncGroupItems 按提交的成员集合新增, 重排与删除分组成员。
 // 成员在分组内按渠道授权唯一, 该授权作为匹配依据, 由此已有成员保留其主键:
 // 主键被分组的当前成员和 Relay 的路由状态引用, 换主键会让人工选择与冷却记录失效。
@@ -184,17 +192,24 @@ func syncGroupItems(tx *gorm.DB, groupID int, requested []model.GroupItemInput) 
 	}
 
 	for priority, requestedItem := range requested {
+		weight := normalizeGroupItemWeight(requestedItem.Weight)
 		current, ok := existingByGrant[requestedItem.ChannelGrantID]
 		if !ok {
-			newItem := model.GroupItem{GroupID: groupID, ChannelGrantID: requestedItem.ChannelGrantID, Priority: priority + 1}
+			newItem := model.GroupItem{GroupID: groupID, ChannelGrantID: requestedItem.ChannelGrantID, Priority: priority + 1, Weight: weight}
 			if err := tx.Create(&newItem).Error; err != nil {
 				return fmt.Errorf("failed to create group item: %w", err)
 			}
 			continue
 		}
+		updates := map[string]any{}
 		if current.Priority != priority+1 {
-			if err := tx.Model(&model.GroupItem{}).Where("id = ?", current.ID).
-				Update("priority", priority+1).Error; err != nil {
+			updates["priority"] = priority + 1
+		}
+		if current.Weight != weight {
+			updates["weight"] = weight
+		}
+		if len(updates) > 0 {
+			if err := tx.Model(&model.GroupItem{}).Where("id = ?", current.ID).Updates(updates).Error; err != nil {
 				return fmt.Errorf("failed to update group item: %w", err)
 			}
 		}
