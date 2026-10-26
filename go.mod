@@ -2,6 +2,8 @@ module github.com/bestruirui/octopus
 
 go 1.26.10
 
+toolchain go1.27.3
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/charmbracelet/log v1.0.0
